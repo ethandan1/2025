@@ -4,7 +4,8 @@ from collections import Counter
 from itertools import combinations
 
 ## TO DO:
-# https://www.youtube.com/watch?v=mENr3b4IlqQ&ab_channel=StackWild
+# Update Flop Strategy to only bet when the pair includes your cards, going to need a lot more logic
+# Implement logic to handle dead cards in preflop and flop and river strategy
 
 
 class Card:
@@ -17,6 +18,9 @@ class Card:
     
     def __str__(self):
         return f"{self.value}{self.suit}"
+    
+    def __repr__(self):
+        return self.__str__()
 
 class Deck:
     def __init__(self):
@@ -65,9 +69,8 @@ class Hand:
         return hand_score
         
 class Player:
-    def __init__(self, balance, hand, bets):
+    def __init__(self, balance, bets):
         self.balance = balance
-        self.hand = hand
         self.bets = bets
         self.current_decision = None
     
@@ -114,18 +117,136 @@ class Decision:
 
 class Strategy:
     def __init__(self):
-        self.strategy = strategy
+        pass
+
+    def preflop_decision(self, hand, dead_cards):
+        ordered_hand = Hand(sorted(hand.cards, key=lambda x: Card.values.index(x.value), reverse=True))
+        rank1, rank2 = card_vals(ordered_hand.cards)
+
+        decision = Decision()
+
+        if rank1 == 14:
+            decision.bet(4)
+            return decision
+        
+        elif rank1 == 13:
+            if is_flush(hand.cards) or (rank2 >= 5):
+                decision.bet(4)
+                return decision
+            else:
+                decision.check()
+                return decision
+        
+        elif rank1 == 12:
+            if (is_flush(hand.cards) and (rank2 >= 6)) or (rank2 >= 8):
+                decision.bet(4)
+                return decision
+            else:
+                decision.check()
+                return decision
+        
+        elif rank1 == 11:
+            if (is_flush(hand.cards) and (rank2 >= 8)) or (rank2 >= 10):
+                decision.bet(4)
+                return decision
+            else:
+                decision.check()
+                return decision
+
+        elif rank1 == rank2 and rank1 >= 3:
+            decision.bet(4)
+            return decision
+
+        else:
+            decision.check()
+            return decision
+    
+    def flop_decision(self, hand, board, dead_cards):
+        all_cards = hand.cards + board.cards[:3]
+        flush_draw, flush_suit = is_flush_draw(all_cards)
+        flush_draw_cards = [card for card in all_cards if card.suit == flush_suit]
+        highest_flush_card = highest_card(flush_draw_cards) if flush_draw_cards else None
+
+        decision = Decision()
+
+        if score_hand(Hand(all_cards))[0] >= 1:
+            decision.bet(2)
+            return decision
+        
+        elif is_flush_draw(all_cards)[0] and card_vals(highest_flush_card)[0] >= 10:
+            decision.bet(2)
+            return decision
+        
+        elif is_flush_draw(all_cards)[0] and is_open_ended_straight_draw(all_cards):
+            decision.bet(2)
+            return decision
+
+        else:
+            decision.check()
+            return decision
+
+    def river_decision(self, hand, board, dead_cards):
+        decision = Decision()
+        dealer_wins = 0
+        player_hand = Hand(hand.cards)
+        remaining_cards = [card for card in deck.cards if card not in player_hand.cards + board.cards + dead_cards]
+        
+        for card in remaining_cards:
+            dealer_hand = Hand(card)
+            if compare_hands(player_hand, dealer_hand, board)[0] == 'Dealer':
+                dealer_wins += 1
+        
+        if dealer_wins <= 20:
+            decision.bet(1)
+            return decision
+        else:
+            decision.fold()
+            return decision
+
+
+                
+
+
 
 class Game:
-    def __init__(self):
-        self.round = round
+    def __init__(self, players, dealer, deck):
+        self.players = players
+        self.dealer = dealer
+        self.deck = deck
+        self.board = Board([])
+        self.bankrolls = [player.balance for player in players]
 
+    def post_bets(self, bets):
+        for player in self.players:
+            player.bets = bets
+    
+    def deal_hands(self):
+        for player in self.players:
+            player.hand = Hand([self.deck.deal_card(), self.deck.deal_card()])
+        self.dealer.hand = Hand([self.deck.deal_card(), self.deck.deal_card()])
+    
+    def deal_flop(self):
+        self.board.extend([self.deck.deal_card(), self.deck.deal_card(), self.deck.deal_card()])
+    
+    def deal_turn_and_river(self):
+        self.board.extend([self.deck.deal_card(), self.deck.deal_card()])
+    
+    def payout_hand(self, player, dealer):
+        return
+
+    def play_game(self):
+        return
+
+        
 
 
 
 ### Main Hand Scoring Functions
 
 def compare_hands(player_hand, dealer_hand, board):
+
+    if isinstance(dealer_hand.cards, Card):
+        dealer_hand.cards = [dealer_hand.cards]
 
     all_cards = player_hand.cards + dealer_hand.cards + board.cards
 
@@ -260,11 +381,28 @@ def is_valid_deck(cards):
             return False, card
     return True, card
 
+def is_flush_draw(cards):
+    suit_count = Counter(c.suit for c in cards)
+    for suit, count in suit_count.items():
+        if count >= 4:
+            return True, suit
+    return False, None
+
+def is_open_ended_straight_draw(cards):
+    values = [c.value for c in cards]
+    index_str = "A23456789TJQKA"
+
+    indices = sorted(index_str.index(v) for v in values)
+
+    for i in range(len(indices) - 3):
+        if np.all(np.diff(indices[i:i+4]) == 1):
+            return True
+    return False
 
 def highest_card(cards):
     values = "23456789TJQKA" 
     highest_card = max(cards, key=lambda card: values.index(card.value))
-    return highest_card.value
+    return highest_card
 
 def sum_of_kickers(hand):
     values = [c.value for c in hand.cards]
@@ -300,13 +438,14 @@ def flush_sort(cards):
     suit_pop = Counter(c.suit for c in cards)
     return sorted(cards, key=lambda x: suit_pop[x.suit], reverse=True)
 
-def pair_sort(cards):
+def pair_sort(cards): 
     num = num_of_kind(cards)  
     return sorted(cards, key=lambda x: (num[x.value], card_vals([x])[0]), reverse=True)
 
 
 def card_vals(cards):
-    """Converts card values to corresponding integers for comparison."""
+    if not isinstance(cards, list):
+        cards = [cards]
     value_map = {"2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, 
                  "T": 10, "J": 11, "Q": 12, "K": 13, "A": 14}
     return [value_map[card.value] for card in cards]
@@ -353,7 +492,11 @@ for i in range(9):
 print(f"Player: {player_hand}, Dealer: {dealer_hand}, Board: {board}")
 print(*compare_hands(player_hand, dealer_hand, board))
 
-# hand = [Card('2','c'), Card('8','h'), Card('J','s'), Card('2','d'), Card('K','h')]
-# sorted_hand = pair_sort(hand)
-# print(f"{sorted_hand}")  # Output the sorted list of cards
+
+player = Player([],[])
+game = Game([],[],[])
+strategy = Strategy()
+print(f"Preflop Basic Strategy:  {strategy.preflop_decision(player_hand, [])}")
+print(f"Flop Basic Strategy:  {strategy.flop_decision(player_hand, board, [])}")
+print(f"River Basic Strategy:  {strategy.river_decision(player_hand, board, [])}")
 
