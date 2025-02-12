@@ -169,7 +169,11 @@ class Strategy:
 
         decision = Decision()
 
-        if score_hand(Hand(all_cards))[0] >= 1:
+        if score_hand(Hand(all_cards))[0] >= 4:
+            decision.bet(2)
+            return decision
+
+        elif any(card.value in [c.value for c in board.cards] for card in hand.cards):
             decision.bet(2)
             return decision
         
