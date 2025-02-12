@@ -4,7 +4,6 @@ from collections import Counter
 from itertools import combinations
 
 ## TO DO:
-# Update Flop Strategy to only bet when the pair includes your cards, going to need a lot more logic
 # Implement logic to handle dead cards in preflop and flop and river strategy
 
 
@@ -162,10 +161,11 @@ class Strategy:
             return decision
     
     def flop_decision(self, hand, board, dead_cards):
-        all_cards = hand.cards + board.cards[:3]
+        flop = create_board(str(card) for card in board.cards[:3])
+        all_cards = hand.cards + flop.cards
         flush_draw, flush_suit = is_flush_draw(all_cards)
-        flush_draw_cards = [card for card in all_cards if card.suit == flush_suit]
-        highest_flush_card = highest_card(flush_draw_cards) if flush_draw_cards else None
+        flush_draw_hand_cards = [card for card in hand.cards if card.suit == flush_suit]
+        highest_flush_card = highest_card(flush_draw_hand_cards) if flush_draw_hand_cards else None
 
         decision = Decision()
 
@@ -173,7 +173,7 @@ class Strategy:
             decision.bet(2)
             return decision
 
-        elif any(card.value in [c.value for c in board.cards] for card in hand.cards):
+        elif any(card.value in [c.value for c in flop.cards] for card in hand.cards):
             decision.bet(2)
             return decision
         
@@ -181,12 +181,12 @@ class Strategy:
             decision.bet(2)
             return decision
         
-        elif is_flush_draw(all_cards)[0] and is_open_ended_straight_draw(all_cards):
+        elif is_flush_draw(all_cards)[0] and is_two_card_straight_draw(all_cards):
             decision.bet(2)
             return decision
 
         else:
-            decision.check()
+            decision.check()  
             return decision
 
     def river_decision(self, hand, board, dead_cards):
@@ -206,10 +206,6 @@ class Strategy:
         else:
             decision.fold()
             return decision
-
-
-                
-
 
 
 class Game:
@@ -364,10 +360,15 @@ def score_hand(hand):
 #### Helper Evaluator Functions 
 
 def create_card(card_str):
-    value = card_str[:-1]  # All but last character for value
-    suit = card_str[-1]    # Last character for suit
+    value = card_str[:-1] 
+    suit = card_str[-1]    
     return Card(value, suit)
 
+def create_hand(hand_str):
+    return Hand([create_card(card) for card in hand_str])
+
+def create_board(board_str):
+    return Board([create_card(card) for card in board_str])
 
 def is_valid_deck(cards):
     valid_ranks = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']
@@ -392,15 +393,25 @@ def is_flush_draw(cards):
             return True, suit
     return False, None
 
-def is_open_ended_straight_draw(cards):
+def is_two_card_straight_draw(cards):
     values = [c.value for c in cards]
     index_str = "A23456789TJQKA"
-
     indices = sorted(index_str.index(v) for v in values)
 
     for i in range(len(indices) - 3):
         if np.all(np.diff(indices[i:i+4]) == 1):
             return True
+
+    test_cards = []
+    straight_count = 0
+    for index in index_str[1:]:
+        test_cards.append(create_card(index+'h'))
+    for card in test_cards:
+        if best_hand(cards + [card])[0] == 4:
+            straight_count += 1
+    if straight_count >= 2:
+        return True
+
     return False
 
 def highest_card(cards):
@@ -469,6 +480,13 @@ def fourth_card(cards):
 def fifth_card(cards):
     return cards[4].value
 
+
+############################################################################################################################################################
+## TESTING ARENA BELOW
+############################################################################################################################################################
+
+
+
 # player_cards = ['As', 'Kd']
 # dealer_cards = ['Ad', 'Kc']
 # board_cards = ['Jd', 'Qd', '9h', 'Ts', '3h']
@@ -493,14 +511,24 @@ for i in range(9):
     elif i % 2 == 1: 
         dealer_hand.append(card)
 
+player_hand = Hand(sorted(player_hand.cards, key=lambda x: Card.values.index(x.value), reverse=True))
+dealer_hand = Hand(sorted(dealer_hand.cards, key=lambda x: Card.values.index(x.value), reverse=True))
+print()
 print(f"Player: {player_hand}, Dealer: {dealer_hand}, Board: {board}")
+print()
 print(*compare_hands(player_hand, dealer_hand, board))
+print()
 
 
-player = Player([],[])
-game = Game([],[],[])
+player = Player(balance = 100, bets = Bets(ante = 1, blind = 1, trips = 0, progressive = 0))
+game = Game(players = [player], dealer = Dealer(hand = dealer_hand), deck = deck)
+
 strategy = Strategy()
-print(f"Preflop Basic Strategy:  {strategy.preflop_decision(player_hand, [])}")
-print(f"Flop Basic Strategy:  {strategy.flop_decision(player_hand, board, [])}")
-print(f"River Basic Strategy:  {strategy.river_decision(player_hand, board, [])}")
+
+print(f"Preflop Basic Strategy:  {strategy.preflop_decision(player_hand, dead_cards = [])}")
+print(f"Flop Basic Strategy:  {strategy.flop_decision(player_hand, board, dead_cards = [])}")
+print(f"River Basic Strategy:  {strategy.river_decision(player_hand, board, dead_cards = [])}")
+print()
+
+#print(f"Flop Basic Strategy:  {strategy.flop_decision(hand = create_hand(['Ks','Ts']), board = create_board(['9c','7h', 'Ad']), dead_cards = [])}")
 
