@@ -2,21 +2,23 @@ import numpy as np
 import pandas as pd
 import json
 import re
+from termcolor import colored
+import math
+from scipy.optimize import minimize
+import os
+import csv
 
 # TO Do:
-##BB: After each round, output should say, Duke went for X, duke was 10% of prize pool, new estimtaed is X with weighting Y, Original is Z with weighting K, blended is B
-#AAA: Figure out why inputting exact fair value CHANGES the estimate, print out new estimated pot, print out total sales and total percentage, maybe make sure percentages all add up to 100? That could be it...   
 # 1. Change growth method to have a better estimate
-# 2. Decide how to output the fair values, estimated pots, and ranges
 # 3. Decide how to weigh the initial pot with the new estimated pot, and slowly reduce the weighting of the initial pot
-# 4.         do this by using the percentage fair share / 100 done so far in the auction to weight the new estimate         
+# 4.         do this by using the percentage fair share / 100 done so far in the auction to weight the new estimate
+# 4 years of auction data, let's synthesize that into % underpriced by pick # and by seed # and graph those as well         
 
 
 class CalcuttaAuction:
-    def __init__(self, past_pots, champ_odds, second_place_odds, final_four_odds, elite_eight_odds, sweet_sixteen_odds, round_32_odds, round_32_vig, team_seeds, odds_type, auction_results):
+    def __init__(self, champ_odds, second_place_odds, final_four_odds, elite_eight_odds, sweet_sixteen_odds, round_32_odds, fanduel_champ_odds, fanduel_second_place_odds, fanduel_final_four_odds, fanduel_elite_eight_odds, fanduel_sweet_sixteen_odds, fanduel_round_32_odds, KenPom_champ_odds, KenPom_second_place_odds, KenPom_final_four_odds, KenPom_elite_eight_odds, KenPom_sweet_sixteen_odds, KenPom_round_32_odds, round_32_vig, team_seeds, auction_results, auction_relative):
         """
         Initialize the auction system.
-        :param past_pots: List of total prize pools from the last 4 years.
         :param champ_odds: Dictionary of American odds for teams to win the championship.
         :param second_place_odds: Dictionary of American odds for teams to reach the championship game.
         :param final_four_odds: Dictionary of American odds for teams to reach the Final Four.
@@ -25,81 +27,97 @@ class CalcuttaAuction:
         :param round_32_odds: Dictionary of American odds for teams to reach the Round of 32.
         :param round_32_vig: The vig adjustment for Round of 32 odds.
         :param team_seeds: Dictionary mapping teams to their seed numbers.
-        :param odds_type: The type of odds used in the input data (e.g., "american", "percentage").
+        :param odds_type: The type of odds used in the input data (e.g., "american", "percentage", "both").
         """
-        self.past_pots = past_pots
         self.estimated_pot = 200000
         self.original_pot = self.estimated_pot  # Store original estimate
         self.last_pot = self.estimated_pot  # Store last round's estimate
         self.auction_results = auction_results
+        self.auction_relative = auction_relative
         self.team_seeds = team_seeds
-        self.odds_type = odds_type
         
         # Convert odds and remove vig
-        self.champ_odds = self.devig_odds(champ_odds, expected_total=1)
-        self.second_place_odds = self.devig_odds(second_place_odds, expected_total=2)
-        self.final_four_odds = self.devig_odds(final_four_odds, expected_total=4)
-        self.elite_eight_odds = self.devig_odds(elite_eight_odds, expected_total=8)
-        self.sweet_sixteen_odds = self.devig_odds(sweet_sixteen_odds, expected_total=16)
-        self.round_32_odds = self.round_32_devig(round_32_odds, specified_vig=round_32_vig)
+        self.champ_odds = self.devig_odds(champ_odds, expected_total=1, odds_type="Percentage")
+        self.second_place_odds = self.devig_odds(second_place_odds, expected_total=2, odds_type="Percentage")
+        self.final_four_odds = self.devig_odds(final_four_odds, expected_total=4, odds_type="Percentage")
+        self.elite_eight_odds = self.devig_odds(elite_eight_odds, expected_total=8, odds_type="Percentage")
+        self.sweet_sixteen_odds = self.devig_odds(sweet_sixteen_odds, expected_total=16, odds_type="Percentage")
+        self.round_32_odds = self.devig_odds(round_32_odds, expected_total=32, odds_type="Percentage")
         
+        self.fanduel_champ_odds = self.devig_odds(fanduel_champ_odds, expected_total=1, odds_type="American")
+        self.fanduel_second_place_odds = self.devig_odds(fanduel_second_place_odds, expected_total = 2, odds_type = "American")
+        self.fanduel_final_four_odds = self.devig_odds(fanduel_final_four_odds, expected_total=4, odds_type="American")
+        self.fanduel_elite_eight_odds =  self.devig_odds(fanduel_elite_eight_odds, expected_total=8, odds_type="American")
+        self.fanduel_sweet_sixteen_odds = self.devig_odds(fanduel_sweet_sixteen_odds, expected_total=16, odds_type="American") 
+        self.fanduel_round_32_odds = self.devig_odds(fanduel_round_32_odds, expected_total=32, odds_type="American")
+
+        self.KenPom_champ_odds = self.devig_odds(KenPom_champ_odds, expected_total = 1, odds_type = "Percentage")
+        self.KenPom_second_place_odds = self.devig_odds(KenPom_second_place_odds, expected_total = 2, odds_type = "Percentage")
+        self.KenPom_final_four_odds = self.devig_odds(KenPom_final_four_odds, expected_total = 4, odds_type = "Percentage")
+        self.KenPom_elite_eight_odds = self.devig_odds(KenPom_elite_eight_odds, expected_total = 8, odds_type = "Percentage")
+        self.KenPom_sweet_sixteen_odds = self.devig_odds(KenPom_sweet_sixteen_odds, expected_total = 16, odds_type = "Percentage")
+        self.KenPom_round_32_odds = self.devig_odds(KenPom_round_32_odds, expected_total = 32, odds_type = "Percentage")
+
         # Generate team probabilities
-        self.odds_dict = self.generate_team_odds()
+        self.odds_dict = self.generate_team_odds(Fanduel = True)
 
         print(f"Initial estimated pot: ${self.estimated_pot:,.0f}")
         print("")
 
-    def estimate_pot_growth(self):
-        """Estimate the total prize pool based on past growth trends."""
-        growth_rates = [self.past_pots[i] / self.past_pots[i - 1] for i in range(1, len(self.past_pots))]
-        avg_growth = np.mean(growth_rates)
-        return self.past_pots[-1] * avg_growth  # Projected pool based on average growth
-    
-    def devig_odds(self, odds_dict, expected_total):
-        if self.odds_type == "percentage":
+    def devig_odds(self, odds_dict, expected_total, odds_type):
+        if odds_type.lower() == "percentage":
             total_prob = sum(odds_dict.values())/100
             adj_factor = total_prob / expected_total
             return {team: odds/100 / adj_factor for team, odds in odds_dict.items()}
         else:
-            """Convert American odds to probabilities and remove vig based on expected number of teams per round."""
-            probabilities = {team: self.american_to_prob(odds) for team, odds in odds_dict.items()}
-            total_prob = sum(probabilities.values())
-            
-            adj_factor = total_prob / expected_total  # Adjust based on expected number of teams
-            return {team: prob / adj_factor for team, prob in probabilities.items()}
-    
-    def round_32_devig(self, odds_dict, specified_vig):
-        if self.odds_type == "percentage":
-            print("Using percentage odds. No vig adjustment.")
-            print("")
-            return {team: odds / 100 for team, odds in odds_dict.items()}
-        else:
-            """Convert American odds to probabilities and remove vig based on specified vig."""
-            probabilities = {team: self.american_to_prob(odds) for team, odds in odds_dict.items()}
-            total_prob = sum(probabilities.values())
-            
-            adj_factor = 1 + specified_vig
-            return {team: prob / adj_factor for team, prob in probabilities.items()}
 
+            """Convert American odds to probabilities and remove vig based on expected number of teams per round."""
+            probabilities = {team: self.american_to_prob(odds, "American") for team, odds in odds_dict.items()}
+            total_prob = sum(probabilities.values())
+            
+            adj_factor = total_prob / expected_total  # Adjusts based on # of teams that should get here
+            return {team: prob / adj_factor for team, prob in probabilities.items()}
     
-    def american_to_prob(self, odds):
-        if self.odds_type == "percentage":
+    def american_to_prob(self, odds, odds_type):
+        if odds_type.lower() == "percentage":
             return odds / 100
         else:
-            return abs(odds) / (abs(odds) + 100) if odds < 0 else 100 / (odds + 100)
+            return (abs(odds) / (abs(odds) + 100))*100 if odds < 0 else (100 / (odds + 100))*100
 
-    def generate_team_odds(self):
-        """Generate per-round probabilities for each team."""
+    def generate_team_odds(self, Fanduel):
         odds_dict = {}
+        output_file="team_odds.csv"
         for team in self.champ_odds:
-            odds_dict[team] = [
-                self.round_32_odds[team],
-                self.sweet_sixteen_odds[team],
-                self.elite_eight_odds[team],
-                self.final_four_odds[team],
-                self.second_place_odds[team],
-                self.champ_odds[team]
-            ]
+            if Fanduel:
+                odds_dict[team] = [
+                    (self.fanduel_round_32_odds[team] * 0.4 + self.KenPom_round_32_odds[team] * 0.4 + self.round_32_odds[team] * 0.2),
+                    (self.fanduel_sweet_sixteen_odds[team] * 0.4 + self.KenPom_sweet_sixteen_odds[team] * 0.4 + self.sweet_sixteen_odds[team] * 0.2),
+                    (self.fanduel_elite_eight_odds[team] * 0.4 + self.KenPom_elite_eight_odds[team] * 0.4 + self.elite_eight_odds[team] * 0.2),
+                    (self.fanduel_final_four_odds[team] * 0.4 + self.KenPom_final_four_odds[team] * 0.4 + self.final_four_odds[team] * 0.2),
+                    (self.fanduel_second_place_odds[team] * 0.4 + self.KenPom_second_place_odds[team] * 0.4 + self.second_place_odds[team] * 0.2),
+                    (self.fanduel_champ_odds[team] * 0.4 + self.KenPom_champ_odds[team] * 0.4 + self.champ_odds[team] * 0.2)
+                ]
+            else:
+                odds_dict[team] = [
+                    self.round_32_odds[team],
+                    self.sweet_sixteen_odds[team],
+                    self.elite_eight_odds[team],
+                    self.final_four_odds[team],
+                    self.second_place_odds[team],
+                    self.champ_odds[team]
+                ]
+        
+        sorted_teams = sorted(odds_dict.items(), key=lambda x: x[1][5], reverse=True)
+        if Fanduel:
+            print("Fanduel 40%, KenPom 40%, 538 20%")
+
+        with open(output_file, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Team', 'Rd 32', 'Sweet 16', 'Elite 8', 'Final 4', 'Title Game', 'Champion'])
+            for team, odds in sorted_teams:
+                odds = [round(odd * 100, 2) for odd in odds]
+                writer.writerow([team] + odds)
+
         print(f"Data Checks:")
         print(f"Sum of round 32 odds: {round(sum([odds[0] for odds in odds_dict.values()]),4)}")
         print(f"Sum of sweet sixteen odds: {round(sum([odds[1] for odds in odds_dict.values()]),4)}")
@@ -112,34 +130,39 @@ class CalcuttaAuction:
     
     def calculate_fair_value(self):
         adjusted_pot = self.estimated_pot * .97
-        #print(f"Adjusted pot: ${adjusted_pot:,.0f}")
 
         seed_bonus_counter = 0
 
         payout_percentages = [0.0075, 0.015, 0.0225, 0.035, 0.06, 0.08] #incremental values, since multiplying by probability for team to reach this round and summing
         fair_values = {}
+        fair_shares = {}
         for team, odds in self.odds_dict.items():
             if team not in self.team_seeds:
                 print(f"Warning: No seed found for team {team}")
             else:
                 seed = self.team_seeds[team]
                 seed_str = str(seed)
-            
-                team_fair_share = sum(prob * pct for prob, pct in zip(odds, payout_percentages)) * 0.97
+
+                team_fair_share = 0.97 * sum(prob * pct for prob, pct in zip(odds, payout_percentages))
+
                 if len(self.auction_results) == 0:
                     fair_values[f"{team} ({seed_str})"] = team_fair_share * self.estimated_pot
+                    fair_shares[f"{team} ({seed_str})"] = team_fair_share
                 else:
                     fair_values[team] = team_fair_share * self.estimated_pot
+                    fair_shares[team] = team_fair_share
         
                 # Apply bonus for 13-16 seeds
             
                 if self.team_seeds.get(team) >= 13:
                     seed_bonus_counter += 1
-                    team_fair_share += 0.03 / 16
+                    
                     if len(self.auction_results) == 0:
                         fair_values[f"{team} ({seed_str})"] += round((0.03 / 16) * self.estimated_pot, 2)
+                        fair_shares[f"{team} ({seed_str})"] += 0.03 / 16
                     else:
                         fair_values[team] += round((0.03 / 16) * self.estimated_pot, 2)
+                        fair_shares[team] += 0.03 / 16
 
                 #print(f"Team: {team}, Fair Percentage: {round(team_fair_share*100,5)}")
 
@@ -148,17 +171,17 @@ class CalcuttaAuction:
 
         fair_values = dict(sorted(fair_values.items(), key=lambda item: item[1], reverse=True))
         
-        print(f"Fair values as % of pool, must be 1:  {round(sum(fair_values.values())/self.estimated_pot,4)}")
-        if len(self.auction_results) == 0:
-            print("Data Checks Complete")
+        fair_values_as_pct = round(sum(fair_values.values())/self.estimated_pot,4)
+        if fair_values_as_pct != 1:
+            print(f"ERROR: Fair values as % of pool, must be 1:  {round(sum(fair_values.values())/self.estimated_pot,4)}")
         print("")
-        return fair_values
+        return fair_values, fair_shares
     
-    def update_pot(self, team, sale_price):
+    def update_pot(self, team, sale_price, a=0.0886, b=4.22):
         if team not in self.odds_dict:
             print("Error: Team not found in odds dictionary.")
             return
-        
+
         fair_share_sum = 0
         self.auction_results[team] = sale_price
         total_sales = sum(self.auction_results.values())
@@ -166,42 +189,51 @@ class CalcuttaAuction:
         self.last_pot = self.estimated_pot  # Store previous estimate before change
         
         payout_percentages = [0.0075, 0.015, 0.0225, 0.035, 0.06, 0.08]
-        team_fair_share_dict = {team: .97* sum(prob * pct for prob, pct in zip(odds, payout_percentages)) for team, odds in self.odds_dict.items()}
-        for team in team_fair_share_dict.keys():
+        fair_shares = {team: .97* sum(prob * pct for prob, pct in zip(odds, payout_percentages)) for team, odds in self.odds_dict.items()}
+        for team in fair_shares.keys():
             seed_str = str(self.team_seeds.get(team))
             if self.team_seeds.get(team) >= 13:
-                team_fair_share_dict[team] += (0.03 / 16)
+                fair_shares[team] += (0.03 / 16)
         
         for team in self.auction_results:
-            fair_share_sum += team_fair_share_dict[team]
+            fair_share_sum += fair_shares[team]
             seed_str = str(self.team_seeds.get(team))
+            
         
         # Calculate new estimated pot
-        team_implied_total = sale_price / team_fair_share_dict[team]
+        team_implied_total = sale_price / fair_shares[team]
         estimated_total = total_sales / fair_share_sum
         
         
         last_team_sold = list(self.auction_results.keys())[-1]
         last_sale_price = self.auction_results[last_team_sold]
 
+        self.auction_relative[team] = (self.auction_results[team] / (fair_shares[team]*self.estimated_pot) - 1) * 100
 
-        print(f"\033[34m----------------------------------------------------------------------------------------------------------------------------\033[0m")
-        print(f"{last_team_sold} ({seed_str}) sold for ${last_sale_price:,.2f}, and was expected to be {team_fair_share_dict[last_team_sold]*100:.2f}% of the pool")
-        print(f"{last_team_sold} ({seed_str}) implies a total pot of {team_implied_total:,.2f}")
+        self.generate_auction_df_for_year_and_params(self.auction_results, fair_shares_2025, (a,b), 2025)
+
+        print(f"\033[34m--------------------------------------------------------------------------------------------------------------------\033[0m")
+        print(f"{last_team_sold} ({seed_str}) sold for ${last_sale_price:,.0f}, and was expected to be {fair_shares[last_team_sold]*100:.2f}% of the pool")
+        print(f"{last_team_sold} ({seed_str}) implies a total pot of ${team_implied_total:,.0f}")
         print("")
-        print(f"Total Auction sales: ${total_sales:,.2f}")
+        print(f"Total Auction sales: ${total_sales:,.0f}")
         print(f"Total Expected Pool % Sold: {fair_share_sum*100:,.2f}%")
-        print(f"All Teams Implied Total Pot: ${estimated_total:,.2f}")
+        print(f"All Teams Implied Total Pot: ${estimated_total:,.0f}")
         
-        # Blend new estimate with previous estimate (50% weight)
-        # FIX FIX FIX, DECAYING WEIGHTING, TEST ON PAST YEARS
-        initial_estimate = 200000
-        self.estimated_pot = (initial_estimate + estimated_total) / 2
+        # Apply exponential decay weighting
+        initial_estimate = 200000  # Initial estimated pot
+        N = len(self.auction_results)  # Number of teams auctioned
+        W_initial = math.exp(- (a * N + b * fair_share_sum))  # Decaying weight
+        fomo_factor = 0.1 * (1 - W_initial) * (1 - N/64)
+
+        self.estimated_pot = W_initial * initial_estimate + (1 - W_initial) * estimated_total + fomo_factor * estimated_total
+
+        
 
         print("")
-        print(f"Previous estimated pot: ${self.last_pot:,.2f}")
-        print(f"\033[32mUpdated estimated pot: ${self.estimated_pot:,.2f}\033[0m .... 50% initial estimate: ${round(initial_estimate):,.2f}, 50% total_expected_pot: ${round(estimated_total):,.2f}")
-        print(f"\033[34m----------------------------------------------------------------------------------------------------------------------------\033[0m")
+        print(f"Previous estimated pot: ${self.last_pot:,.0f}")
+        print(f"\033[32mUpdated estimated pot: ${self.estimated_pot:,.0f}\033[0m -- {round(W_initial*100,2)}% initial estimate: ${round(initial_estimate):,.0f}, {round((1-W_initial)*100,2)}% total_expected_pot: ${round(estimated_total):,.0f}, fomo_factor: {fomo_factor*100:.2f}%")
+        print(f"\033[34m--------------------------------------------------------------------------------------------------------------------\033[0m")
         print("")
     
     def run_live_update(self):
@@ -209,42 +241,313 @@ class CalcuttaAuction:
             team = input("Enter team name (or 'exit' to stop, 'undo' to revert last entry): ").strip()
             if team.lower() == 'exit':
                 break
+            if team.lower() == 'adjust':
+                try:
+                    new_pot = float(input("Enter new estimated pot: ").strip())
+                    self.estimated_pot = new_pot
+                    fair_values, fair_shares = self.calculate_fair_value()
+                    self.print_results_table(fair_values, fair_shares)
+                    continue
+                except ValueError:
+                    print("Error: Pot must be a number.")
+                    continue
+
             if team.lower() == 'undo' and self.auction_results:
                 last_team = list(self.auction_results.keys())[-1]
                 self.estimated_pot = self.last_pot
                 del self.auction_results[last_team]
+                print("")
                 print(f"Undo last entry: {last_team}")
+                fair_values, fair_shares = self.calculate_fair_value()
+                # print(fair_values, fair_shares)
+                self.print_results_table(fair_values, fair_shares)
                 continue
+            
             if team not in self.odds_dict:
                 print("Invalid team. Try again.")
                 continue
+                
             if team in self.auction_results:
                 print("Error: Team has already been sold.")
                 continue
+            
+            self.show_team_details(team)
             try:
                 price = float(input(f"Enter sale price for {team}: ").strip())
-                self.update_pot(team, price)
-                fair_values = self.calculate_fair_value()
-                for team, value in fair_values.items():
-                    seed = self.team_seeds[team.split(" (")[0]]
-                    seed_str = str(seed)
-                    if team in self.auction_results:
-                        sale_price = self.auction_results[team]
-                        if sale_price > value:
-                            formatted_sale_price = f"\033[91m Sold for: ${sale_price:,.0f}\033[0m"
-                        else:
-                            formatted_sale_price = f"\033[32m Sold for: ${sale_price:,.0f}\033[0m"
-                        formatted_team = f"\033[94m{team} ({seed_str})\033[0m"  
-                        formatted_value = f"\033[94m{float(value):,.2f}\033[0m" 
+            except ValueError:
+                print("Error: Price must be a number.")
+                continue
+                
+            self.update_pot(team, price)
+            fair_values, fair_shares = self.calculate_fair_value()
+            self.print_results_table(fair_values, fair_shares)
 
-                        print(f"{formatted_team}: {formatted_value}, {formatted_sale_price}")
-                    else:
-                        formatted_value = f"{float(value):,.2f}"
-                        print(f"{team} ({seed_str}): {formatted_value}")
+    def print_results_table(self, fair_values, fair_shares):
+        # Formatting setup
+        max_team_length = max(len(team) for team in fair_values.keys())
+        max_value_length = max(len(f"{float(value):,.0f}") for value in fair_values.values()) + 2
+        max_percent_length = max(len(f"{fair_share*100:.2f}%") for fair_share in fair_shares.values())
 
-            except ValueError as e:
-                print(f"Error: {e}")
+        team_col_width = max_team_length + 6
+        value_col_width = max_value_length - 1
+        percent_col_width = max_percent_length + 6
+
+        # Print header
+        print(f"{'Team':<{team_col_width}}{'Fair Value':>{value_col_width}} |{'Fair Share':>{percent_col_width}}  Auction Results")
+        separator = "-" * team_col_width + "-" * value_col_width + "----+-" + "-" * percent_col_width + "-" * 20
+        print(separator)
         
+        # Print team data
+        for team_and_seed, value in fair_values.items():
+            if len(self.auction_results) == 0:
+                team = team_and_seed
+                fair_share = fair_shares[team]
+            else:
+                team = team_and_seed.split(" (")[0]
+                seed = self.team_seeds[team]
+                seed_str = str(seed)
+                fair_share = fair_shares[team]
+
+            if team in self.auction_results:
+                sale_price = self.auction_results[team]
+                
+                team_str = f"{team} ({seed_str})"
+                value_str = f"{float(value):,.0f}"
+                percent_str = f"{fair_share*100:.2f}%"
+
+                team_padded = team_str.ljust(team_col_width)
+                value_padded = value_str.rjust(value_col_width)
+                percent_padded = percent_str.rjust(percent_col_width)
+                
+                team_colored = colored(team_padded, 'blue')
+                value_colored = colored(value_padded, 'blue')
+                percent_colored = colored(percent_str, 'blue')
+                
+                if sale_price > value:
+                    sale_price_colored = colored(f" ${sale_price:,.0f}", 'red')
+                else:
+                    sale_price_colored = colored(f" ${sale_price:,.0f}", 'green')
+                
+                print(f"{team_colored}  {value_colored}  |  {percent_colored}        {sale_price_colored}")
+            else:
+                if len(self.auction_results) == 0:
+                    team_str = team
+                    value_str = f"{float(value):,.0f}"
+                    percent_str = f"{fair_share*100:.2f}%"
+                else:
+                    team_str = f"{team} ({seed_str})"
+                    value_str = f"{float(value):,.0f}"
+                    percent_str = f"{fair_share*100:.2f}%"
+                
+                team_padded = team_str.ljust(max_team_length + 5)
+                value_padded = value_str.rjust(max_value_length + 2)
+                
+                print(f"{team_padded}{value_padded}  |  {percent_str}")
+
+    def show_team_details(self, team):
+        N = len(self.auction_results)
+
+
+        # Calculate fair values for various scenarios
+        expected_pot = self.estimated_pot
+        width = max(0.15 * (1 - N/64),.05)
+        min_pot_estimate = expected_pot * (1 - width)
+        max_pot_estimate = expected_pot * (1 + width)
+    
+        # Calculate bear case (bottom range)
+        self.estimated_pot = min_pot_estimate
+        bear_fair_values, _ = self.calculate_fair_value()
+        
+        # Calculate bull case (top range)
+        self.estimated_pot = max_pot_estimate
+        bull_fair_values, _ = self.calculate_fair_value()
+        
+        # Calculate expected case (midpoint)
+        self.estimated_pot = expected_pot
+        fair_values, fair_shares = self.calculate_fair_value()
+        
+        # Find the team in the keys
+        team_key = None
+        for key in fair_values.keys():
+            if len(self.auction_results) == 0:
+                if key.split(" (")[0] == team:
+                    print(key)
+                    team_key = key
+                    break
+            else:
+                if key == team:
+                    team_key = key
+                    break
+        
+        if not team_key:
+            print(f"Team '{team}' not found.")
+            return
+        
+        seed = self.team_seeds[team]
+        seed_str = str(seed)
+        team_str = f"{team} ({seed_str})"
+        
+        # ----- SECTION 1: FAIR VALUE DETAILS -----
+        # Determine column widths
+        team_col_width = len(team_str) + 6
+        value_col_width = max(
+            len(f"${float(bear_fair_values[team_key]):,.0f}"),
+            len(f"${float(fair_values[team_key]):,.0f}"),
+            len(f"${float(bull_fair_values[team_key]):,.0f}")
+            
+        ) + 8
+        percent_col_width = len(f"{fair_shares[team_key]*100:.2f}%") + 4
+
+        total_width = 110
+        
+        print("\n" + "=" * total_width)
+        print(f"TEAM DETAILS: {team_str}")
+        print("=" * total_width + "\n")
+        
+        # Header for section 1
+        print("FAIR VALUE ANALYSIS:")
+        width_adj = 6
+        print(f"{'Team':<{team_col_width-3}}{' | '}{' FV ($'}{min_pot_estimate:,.0f}{') |':<{value_col_width-width_adj}}{'FV ($'}{self.estimated_pot:,.0f}{') | ':<{value_col_width-width_adj}}{'FV ($'}{max_pot_estimate:,.0f}{') | ':<{value_col_width-width_adj}}{'Fair Share %':<{percent_col_width-width_adj}}")
+        separator = "-" * total_width
+        print(separator)
+        
+        # Data for section 1
+        col_adj = 4
+        team_padded = f"{team_str}    | ".ljust(team_col_width)
+        bear_value = f"     ${float(bear_fair_values[team_key]):,.0f}".ljust(value_col_width+col_adj-2) + ' | '
+        exp_value = f"    ${float(fair_values[team_key]):,.0f}".ljust(value_col_width+col_adj) + '| '
+        bull_value = f"      ${float(bull_fair_values[team_key]):,.0f}".ljust(value_col_width+col_adj) + '| '
+        percent_str = f"    {fair_shares[team_key]*100:.2f}%".ljust(percent_col_width+col_adj)
+        
+        print(f"{team_padded}{bear_value}{exp_value}{bull_value}{percent_str}")
+        print("\n")
+        
+       # ----- SECTION 2: RELEVANT TRANSACTIONS -----
+        print("RELEVANT TRANSACTIONS:")
+
+        # Get sorted list of teams by fair value
+        sorted_teams = [k.split(" (")[0] for k in fair_values.keys()]
+
+        relevant_teams = []
+        team_fair_share = fair_shares[team_key]
+        seed = self.team_seeds[team]
+
+        for t in sorted_teams:
+            # Find the key for this team in fair_shares
+            t_key = None
+            for key in fair_values.keys():
+                if key.split(" (")[0] == t:
+                    t_key = key
+                    break
+                    
+            if t_key is None:
+                continue
+                
+            t_fair_share = fair_shares[t_key]
+            
+            # Check if team has same seed or fair_share within 10% of current team
+            percentage_diff = abs(t_fair_share - team_fair_share) / team_fair_share
+            if self.team_seeds.get(t) == seed or percentage_diff <= 0.1:
+                if t in self.auction_results or t == team:
+                    relevant_teams.append(t)
+
+        # Ensure the current team is always included
+        if team not in relevant_teams:
+            relevant_teams = [team]
+
+        # Column widths for transactions table
+        team_trans_width = max(len("Relevant Transactions"), max([len(f"{t} ({self.team_seeds[t]})") for t in relevant_teams]) + 7)
+        share_width = max(len("Fair Share %"), max([len(f"{fair_shares.get(t, 0)*100:.2f}%") for t in relevant_teams]) + 7)
+        diff_width = 20
+
+        # Calculate price width safely
+        if any(t in self.auction_results for t in relevant_teams):
+            price_width = max(len("Price"), max([len(f"${self.auction_results[t]:,.0f}") for t in relevant_teams if t in self.auction_results]) + 2)
+        else:
+            price_width = len("Price") + 5  # Default width if no teams have been sold
+
+        # Header for section 2
+        header = (f"{'Relevant Transactions':<{team_trans_width}} | {'Price':<{price_width}} | "
+                f"{'Fair Share %':<{share_width}} | {'% Over/Under FV':<{diff_width}}")
+        print(header)
+        
+        # Create separator with vertical lines
+        parts = ["-" * (team_trans_width), "-" * (price_width), "-" * (share_width), "-" * (diff_width)]
+        separator = "-+-".join(parts)
+        print(separator)
+
+        # Data for section 2
+        for t in relevant_teams:
+            t_str = f"{t} ({self.team_seeds[t]})".ljust(team_trans_width)
+            t_key = None
+            for key in fair_values:
+                if key.split(" (")[0] == t:
+                    t_key = key
+                    break
+            
+            if t in self.auction_results:
+                price = self.auction_results[t]
+
+                seed_str = str(self.team_seeds[t])
+                if len(self.auction_results) == 0:
+                    team_key = f"{t} ({seed_str})"
+                else:
+                    team_key = t
+
+                price_str = f"${price:,.0f}".ljust(price_width)
+                pct_diff = auction_relative[t]
+                if pct_diff > 0:
+                    diff_str = colored(f"+{pct_diff:.1f}%".ljust(diff_width), 'red')
+                else:
+                    diff_str = colored(f"{pct_diff:.1f}%".ljust(diff_width), 'green')
+            else:
+                price_str = "".ljust(price_width)
+                diff_str = "".ljust(diff_width)
+
+            share_str = f"{fair_shares[t_key]*100:.2f}%".ljust(share_width)
+            print(f"{t_str} | {price_str} | {share_str} | {diff_str}")
+        print("\n")
+        
+        # ----- SECTION 3: ODDS BREAKDOWN -----
+        print("ODDS BREAKDOWN:")
+        # Column widths for odds table
+        odds_type_width = 12
+        rounds_width = 10
+        
+        # Header for section 2
+        header = (f"{'Odds Type':<{odds_type_width-1}} | {'Round 32':<{rounds_width-3}} | {'Sweet 16':<{rounds_width-3}} | "
+              f"{'Elite 8 ':<{rounds_width-3}} | {'Final 4 ':<{rounds_width-3}} | {'2nd Place':<{rounds_width-4}} | {'Winner':<{rounds_width-3}}")
+        print(header)
+        
+        #Separator for section 2
+        parts = ["-" * (odds_type_width-1)]
+        for _ in range(6):
+            parts.append("-" * (rounds_width-2))
+        separator = "-+-".join(parts)
+        print(separator)
+
+        width_adj = 2
+        # Data for FanDuel odds
+        fd_row = f"{'FD Odds':<{odds_type_width-1}} | "
+        fd_r32 = f"{self.fanduel_round_32_odds[team]*100:.1f}%".ljust(rounds_width-width_adj) + " | "
+        fd_s16 = f"{self.fanduel_sweet_sixteen_odds[team]*100:.1f}%".ljust(rounds_width-width_adj) + " | "
+        fd_e8 = f"{self.fanduel_elite_eight_odds[team]*100:.1f}%".ljust(rounds_width-width_adj) + " | "
+        fd_f4 = f"{self.fanduel_final_four_odds[team]*100:.1f}%".ljust(rounds_width-width_adj) + " | "
+        fd_2nd =f"{self.fanduel_second_place_odds[team]*100:.1f}%".ljust(rounds_width-width_adj) + " | "
+        fd_win = f"{self.fanduel_champ_odds[team]*100:.1f}%".ljust(rounds_width-width_adj)
+        print(f"{fd_row}{fd_r32}{fd_s16}{fd_e8}{fd_f4}{fd_2nd}{fd_win}")
+        
+        # Data for KenPom odds
+        kp_row = f"{'KenPom Odds':<{odds_type_width-1}} | "
+        kp_r32 = f"{self.round_32_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_s16 = f"{self.sweet_sixteen_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_e8 = f"{self.elite_eight_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_f4 = f"{self.final_four_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_2nd = f"{self.second_place_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_win = f"{self.champ_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj)
+        print(f"{kp_row}{kp_r32}{kp_s16}{kp_e8}{kp_f4}{kp_2nd}{kp_win}")
+        print("\n")
+
     def past_auction_study(self, auction_results, year):
         team_implied_total_pot = {}
         all_teams_implied_total_pot = {}
@@ -254,24 +557,24 @@ class CalcuttaAuction:
         running_fair_pct = 0
 
         payout_percentages = [0.0075, 0.015, 0.0225, 0.035, 0.06, 0.08]
-        team_fair_share_dict = {}
+        fair_shares = {}
 
         for team, odds in auction.odds_dict.items():
             team_fair_share = .97 * sum(prob * pct for prob, pct in zip(odds, payout_percentages))
 
-            seed = auction.team_seeds.get(team)
+            seed = auction.team_seeds[team]
             if seed is None:
                 print(f"Team not found in team_seeds: '{team}'")
             elif seed >= 13:
                 team_fair_share += (0.03 / 16)
-            team_fair_share_dict[team] = team_fair_share
+            fair_shares[team] = team_fair_share
 
         for team in teams_in_auction_order:
             price_paid = auction_results[team]
             running_total += price_paid
             
-            if team in team_fair_share_dict:
-                running_fair_pct += team_fair_share_dict[team]
+            if team in fair_shares:
+                running_fair_pct += fair_shares[team]
             else:
                 print(f"Warning: {team} not found in odds dictionary")
                 continue
@@ -280,7 +583,7 @@ class CalcuttaAuction:
                 all_teams_implication = running_total / running_fair_pct
                 all_teams_implied_total_pot[team] = all_teams_implication
 
-                individual_team_implication = price_paid / team_fair_share_dict[team]
+                individual_team_implication = price_paid / fair_shares[team]
                 team_implied_total_pot[team] = individual_team_implication
 
         results_df = pd.DataFrame({
@@ -291,17 +594,389 @@ class CalcuttaAuction:
             'Team_Implied_Total_Pot': [round(value) for value in team_implied_total_pot.values()],
             'All_Teams_Implied_Total_Pot': [round(value) for value in all_teams_implied_total_pot.values()],
             'Cumulative_Spent': [round(sum(list(auction_results.values())[:i+1])) for i in range(len(team_implied_total_pot))],
-            'Fair_Value_Pct': [round(team_fair_share_dict.get(team, 0)*100, 2) for team in team_implied_total_pot.keys()],
-            'Cumulative_Fair_Pct': [round(sum([team_fair_share_dict.get(teams_in_auction_order[j], 0) for j in range(i+1)])*100, 2)
+            'Fair_Value_Pct': [round(fair_shares.get(team, 0)*100, 2) for team in team_implied_total_pot.keys()],
+            'Cumulative_Fair_Pct': [round(sum([fair_shares.get(teams_in_auction_order[j], 0) for j in range(i+1)])*100, 2)
                                     for i in range(len(team_implied_total_pot))]
         })
 
-
-        results_df.to_csv(f'implied_total_pot_{year}_auction.csv', index=False)
+        folder_path = "Auction CSVs"
+        filename = f"implied_total_pot_{year}_auction.csv"
+        filename = os.path.join(folder_path, filename)
+        results_df.to_csv(filename, index=False)
         return results_df
 
+    def get_initial_estimate(self, year):
+        """Determine the initial estimate as a percentage of the previous year's final pot."""
+        if year == 2021:
+            return 125000
+        elif year == 2022:
+            return 120000
+        elif year == 2023:
+            return 145000
+        elif year == 2024:
+            return 135000
+
+    def simulate_auction(self, auction_results, fair_shares, initial_estimate, a, b, C, year):
+        """Simulates the auction process and computes the Mean Squared Error for the estimated pot."""
+        estimated_pots = []
+        actual_pots = []
+        estimated_pot = initial_estimate
+        total_sales = 0
+        fair_share_sum = 0
+        N = 0
+
+        for team, sale_price in auction_results.items():
+            seed_str = f" ({team_seeds_data[year][team]})" 
+            N += 1
+            total_sales += sale_price
+            fair_share_sum += fair_shares[team+seed_str]
+            W_initial = math.exp(- (a * N + b * fair_share_sum))
+
+            estimated_pot = W_initial * initial_estimate + (1 - W_initial) * (total_sales / fair_share_sum)
+
+            estimated_pots.append(estimated_pot)
+            actual_pots.append(sum(auction_results.values()))  # The true pot value at this point
+
+        mse = round(np.mean((np.array(estimated_pots) - np.array(actual_pots)) ** 2))
+
+
+        log_data.append({"Year": year, "a": a, "b": b, "C": C, "MSE": mse, "root(MSE)": round(math.sqrt(mse)), "Estimated_Pot": round(initial_estimate), "Actual_Pot": sum(auction_results.values())})
+
+        return mse
+
+    def cross_validation(self, auction_results_data, fair_share_data, max_iterations=10000):
+        """Perform cross-validation by leaving out one year at a time and training the model."""
+        
+        results = []  # List to store the results for each iteration (year left out)
+        optimal_params_by_year = {}  # Dictionary to store optimal parameters for each year
+        
+        # Get the list of all years
+        all_years = list(auction_results_data.keys())
+        
+        # Helper function to optimize the parameters
+        def callback(params, iteration_results, years_to_use):
+            a, b, C = params
+            mse_total = objective(params, years_to_use)
+            iteration_results.append({
+                'Iteration': len(iteration_results) + 1,
+                'a': round(a, 4),
+                'b': round(b, 4),
+                'C': round(C, 2),
+                'Training_MSE': round(math.sqrt(mse_total), 2)
+            })
+        
+        # Helper function for the objective function
+        def objective(params, years_to_use):
+            a, b, C = params
+            mse_total = 0
+            for year in years_to_use:
+                initial_estimate = self.get_initial_estimate(year)
+                mse_total += self.simulate_auction(auction_results_data[year], fair_share_data[year], initial_estimate, a, b, C, year)
+            return mse_total / len(years_to_use)  # Average MSE across training years
+
+        # Loop through each year, leaving that year out for testing
+        for year_to_leave_out in all_years:
+            print(f"\nTraining and testing with {year_to_leave_out} left out.")
+            
+            # Create the training data by excluding the current year
+            years_to_use = [year for year in all_years if year != year_to_leave_out]
+            
+            # List to store the iterations for the current year-to-leave-out
+            iteration_results = []
+            
+            # Initial guess for parameters
+            initial_guess = [0.3, 3.0, 5000]
+            bounds = [(0.01, 2), (1, 20), (-10000, 50000)]  # Example bounds for a, b, C
+            
+            # Run optimization with callback for leaving out the year
+            result = minimize(lambda params: objective(params, years_to_use), initial_guess, bounds=bounds, method='Powell', options={'maxiter': max_iterations, 'disp': True}, callback=lambda params: callback(params, iteration_results, years_to_use))
+            
+            # After optimization is complete, test the model on the left-out year
+            a, b, C = result.x  # Optimal parameters from final iteration
+            optimal_params_by_year[year_to_leave_out] = (a, b, C)  # Store the optimal parameters
+            
+            final_mse = result.fun
+            
+            # Test the model on the left-out year
+            initial_estimate = self.get_initial_estimate(year_to_leave_out)
+            test_mse = self.simulate_auction(auction_results_data[year_to_leave_out], fair_share_data[year_to_leave_out], initial_estimate, a, b, C, year_to_leave_out)
+            
+            # Append the results of the final test for the current leave-out year
+            iteration_results.append({
+                'Iteration': 'Final Test',
+                'a': round(a, 4),
+                'b': round(b, 4),
+                'C': round(C, 2),
+                'Training_MSE': round(math.sqrt(final_mse), 2),
+                'Test_MSE': round(math.sqrt(test_mse), 2)
+            })
+            
+            # Add the iteration results for this leave-out year to the overall results
+            for iteration_result in iteration_results:
+                iteration_result['Year_Left_Out'] = year_to_leave_out
+                results.append(iteration_result)
+        
+        # Now, run the model on all years without leaving any out (5th iteration)
+        print("\nTraining and testing with no year left out.")
+        
+        # Create the training data by using all years
+        years_to_use = all_years
+        
+        # List to store the iterations for the no-year-left-out case
+        iteration_results = []
+        
+        # Run optimization for all years (no leave-out)
+        result = minimize(lambda params: objective(params, years_to_use), initial_guess, bounds=bounds, method='Powell', options={'maxiter': max_iterations, 'disp': True}, callback=lambda params: callback(params, iteration_results, years_to_use))
+        
+        # After optimization is complete, test the model on all years
+        a, b, C = result.x  # Optimal parameters from final iteration
+        optimal_params_by_year['All_Years'] = (a, b, C)  # Store the optimal parameters
+        
+        final_mse = result.fun
+        
+        # Test the model on all years
+        for year in all_years:
+            initial_estimate = self.get_initial_estimate(year)
+            test_mse = self.simulate_auction(auction_results_data[year], fair_share_data[year], initial_estimate, a, b, C, year)
+            
+            # Append the results of the final test for the current leave-out year
+            iteration_results.append({
+                'Iteration': 'Final Test',
+                'a': round(a, 4),
+                'b': round(b, 4),
+                'C': round(C, 2),
+                'Training_MSE': round(math.sqrt(final_mse), 2),
+                'Test_MSE': round(math.sqrt(test_mse), 2)
+            })
+        
+        # Add the iteration results for the no-year-left-out case to the overall results
+        for iteration_result in iteration_results:
+            iteration_result['Year_Left_Out'] = 'All_Years'
+            results.append(iteration_result)
+
+        # Create a DataFrame from the results and save to CSV
+        df = pd.DataFrame(results)
+        df.to_csv('cross_validation_results.csv', index=False)
+        print("Cross-validation complete. Results saved to 'cross_validation_results.csv'.")
+        
+        # Return the optimal parameters by year for later use
+        return optimal_params_by_year
+
+    def generate_auction_df_for_year_and_params(self, auction_results, fair_shares, optimal_params, year):
+        """
+        Generate a DataFrame for a specific year with the optimal parameters (a, b).
+        """
+        # Extract optimal parameters (a, b) for the given year
+        a, b = optimal_params
+
+        # Initialize data structures for simulation
+        team_implied_total_pot = {}
+        all_teams_implied_total_pot = {}
+        smart_estimated_pot = {}
+        W_initial_values = {}
+        fair_value_pcts = {}
+        teams_in_auction_order = list(auction_results.keys())
+
+        running_total = 0
+        running_fair_pct = 0
+        N = 0
+        initial_estimate = self.original_pot 
+
+        for team in teams_in_auction_order:
+            N += 1
+            seed_str = f" ({team_seeds_data[year][team]})"
+            price_paid = auction_results[team]
+            running_total += price_paid
+            running_fair_pct += fair_shares[team+seed_str]
+            W_initial = math.exp(- (a * N + b * running_fair_pct))
+            
+
+            all_teams_implication = running_total / running_fair_pct
+            all_teams_implied_total_pot[team] = all_teams_implication
+
+            individual_team_implication = price_paid / fair_shares[team+seed_str]
+            team_implied_total_pot[team] = individual_team_implication
+
+            fomo_factor = 0.1 * (1 - W_initial) * (1 - N/64)
+            
+            self.estimated_pot = W_initial * initial_estimate + (1 - W_initial) * all_teams_implication + fomo_factor * all_teams_implication
+            smart_estimated_pot[team] = self.estimated_pot
+
+            W_initial_values[team] = W_initial
+            fair_value_pcts[team] = round(fair_shares[team+seed_str]*100,2)
+
+
+            #print(fair_shares)
+
+        # Create the DataFrame to hold all relevant results
+        results_df = pd.DataFrame({
+            'Auction_Order': list(range(1, len(team_implied_total_pot) + 1)),
+            'Team': list(team_implied_total_pot.keys()),
+            'Price_Paid': [round(auction_results[team]) for team in team_implied_total_pot.keys()],
+            'Team_Implied_Total_Pot': team_implied_total_pot.values(),
+            'All_Teams_Implied_Total_Pot': all_teams_implied_total_pot.values(),
+            'Cumulative_Spent': [round(sum(list(auction_results.values())[:i+1])) for i in range(len(team_implied_total_pot))],
+            'Fair_Value_Pct': fair_value_pcts.values(),
+            'Smart_Estimated_Pot': smart_estimated_pot.values(),
+            'Initial_Estimate_Weighting (W_initial)': W_initial_values.values(),
+            'Complement_Estimate_Weighting (1-W_initial)': [(1 - W_initial) for W_initial in W_initial_values.values()],
+        })
+
+        filename = f'Live 2025 Auction Graph.csv'
+        folder_path = "Weighting Optimization CSVs"
+        filename = os.path.join(folder_path, filename)
+        results_df.to_csv(filename, index=False)
+        return results_df
+
+    def generate_raw_fd_odds_csv(self):
+        for team in auction.fanduel_champ_odds:
+            fanduel_round_32_odds_2025[team] = auction.american_to_prob(fanduel_round_32_odds_2025[team], "American")
+            fanduel_sweet_sixteen_odds_2025[team] = auction.american_to_prob(fanduel_sweet_sixteen_odds_2025[team], "American")
+            fanduel_elite_eight_odds_2025[team] = auction.american_to_prob(fanduel_elite_eight_odds_2025[team], "American")
+            fanduel_final_four_odds_2025[team] = auction.american_to_prob(fanduel_final_four_odds_2025[team], "American")
+            fanduel_second_place_odds_2025[team] = auction.american_to_prob(fanduel_second_place_odds_2025[team], "American")
+            fanduel_champ_odds_2025[team] = auction.american_to_prob(fanduel_champ_odds_2025[team], "American")
+
+        # Then create the dictionary with the converted odds
+        odds_dict = {}
+        for team in auction.fanduel_champ_odds:
+            odds_dict[team] = [
+                fanduel_round_32_odds_2025[team], 
+                fanduel_sweet_sixteen_odds_2025[team], 
+                fanduel_elite_eight_odds_2025[team], 
+                fanduel_final_four_odds_2025[team], 
+                fanduel_second_place_odds_2025[team], 
+                fanduel_champ_odds_2025[team]
+            ]
+
+        # Sort teams by champion odds (highest to lowest)
+        sorted_teams = sorted(odds_dict.items(), key=lambda x: x[1][5], reverse=True)
+
+        output_file = "FD_Raw_Odds.csv"
+        with open(output_file, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Team', 'Rd 32', 'Sweet 16', 'Elite 8', 'Final 4', 'Title Game', 'Champion'])
+            for team, odds in sorted_teams:
+                # No need to multiply by 100 since american_to_prob already returns percentage values
+                odds = [round(odd, 2) for odd in odds]
+                writer.writerow([team] + odds)
+    
+    def generate_american_fd_odds_csv(self):
+        odds_dict = {}
+        for team in auction.fanduel_champ_odds:
+            odds_dict[team] = [
+                fanduel_round_32_odds_2025[team], 
+                fanduel_sweet_sixteen_odds_2025[team], 
+                fanduel_elite_eight_odds_2025[team], 
+                fanduel_final_four_odds_2025[team], 
+                fanduel_second_place_odds_2025[team], 
+                fanduel_champ_odds_2025[team]
+            ]
+
+        # Sort teams by champion odds (highest to lowest)
+        sorted_teams = sorted(odds_dict.items(), key=lambda x: x[1][5], reverse=False)
+
+        output_file = "FD_American_Odds.csv"
+        with open(output_file, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Team', 'Rd 32', 'Sweet 16', 'Elite 8', 'Final 4', 'Title Game', 'Champion'])
+            for team, odds in sorted_teams:
+                # No need to multiply by 100 since american_to_prob already returns percentage values
+                odds = [round(odd, 2) for odd in odds]
+                writer.writerow([team] + odds)
+
+    def generate_devigged_fd_odds_csv(self):
+        odds_dict = {}
+        for team in auction.fanduel_champ_odds:
+            odds_dict[team] = [
+                auction.fanduel_round_32_odds[team]*100, 
+                auction.fanduel_sweet_sixteen_odds[team]*100, 
+                auction.fanduel_elite_eight_odds[team]*100, 
+                auction.fanduel_final_four_odds[team]*100, 
+                auction.fanduel_second_place_odds[team]*100, 
+                auction.fanduel_champ_odds[team]*100
+            ]
+
+        # Sort teams by champion odds (highest to lowest)
+        sorted_teams = sorted(odds_dict.items(), key=lambda x: x[1][5], reverse=True)
+
+        output_file = "FD_Devigged_Odds.csv"
+        with open(output_file, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Team', 'Rd 32', 'Sweet 16', 'Elite 8', 'Final 4', 'Title Game', 'Champion'])
+            for team, odds in sorted_teams:
+                # No need to multiply by 100 since american_to_prob already returns percentage values
+                odds = [round(odd, 2) for odd in odds]
+                writer.writerow([team] + odds) 
 # Seed and Odds Data Below 2021 - 2024
 
+round_32_vig = 0
+
+team_seeds_2025 = {
+    "Duke": 1,
+    "Florida": 1,
+    "Houston": 1,
+    "Auburn": 1,
+    "Alabama": 2,
+    "Saint John's": 2,
+    "Tennessee": 2,
+    "Michigan State": 2,
+    "Wisconsin": 3,
+    "Texas Tech": 3,
+    "Kentucky": 3,
+    "Iowa State": 3,
+    "Arizona": 4,
+    "Maryland": 4,
+    "Purdue": 4,
+    "Texas A&M": 4,
+    "Oregon": 5,
+    "Memphis": 5,
+    "Clemson": 5,
+    "Michigan": 5,
+    "BYU": 6,
+    "Missouri": 6,
+    "Illinois": 6,
+    "Ole Miss": 6,
+    "Saint Mary's": 7,
+    "Kansas": 7,
+    "UCLA": 7,
+    "Marquette": 7,
+    "Gonzaga": 8,
+    "Connecticut": 8,
+    "Louisville": 8,
+    "Mississippi State": 8,
+    "Baylor": 9,
+    "Oklahoma": 9,
+    "Georgia": 9,
+    "Creighton": 9,
+    "Utah State": 10,
+    "Arkansas": 10,
+    "New Mexico": 10,
+    "Vanderbilt": 10,
+    "VCU": 11,
+    "Drake": 11,
+    "UNC/San Diego State": 11,
+    "Texas/Xavier": 11,
+    "Colorado State": 12,
+    "Liberty": 12,
+    "McNeese": 12,
+    "UC San Diego": 12,
+    "Grand Canyon": 13,
+    "High Point": 13,
+    "Yale": 13,
+    "Akron": 13,
+    "UNC Wilmington": 14,
+    "Troy": 14,
+    "Lipscomb": 14,
+    "Montana": 14,
+    "Omaha": 15,
+    "Wofford": 15,
+    "Bryant": 15,
+    "Robert Morris": 15,
+    "American/Mount St. Mary's": 16,
+    "Norfolk State": 16,
+    "SIUE": 16,
+    "Alabama State/Saint Francis": 16 }
 team_seeds_2024 = {
     "Connecticut": 1,
     "Purdue": 1,
@@ -412,7 +1087,6 @@ team_seeds_2023 = {
     "Missouri": 7,
     "NC State": 11,
     "Drake": 12,
-    "Mississippi St.": 11,
     "Oral Roberts": 12,
     "Nevada/Arizona State": 11,
     "Kent State": 13,
@@ -434,7 +1108,6 @@ team_seeds_2023 = {
     "Texas A&M Corpus Chris": 16,
     "Howard": 16,
     "Southern": 16,
-    "Southeast Missouri St.": 16,
     "FDU/Texas Southern": 16
     }
 team_seeds_2022 = {
@@ -486,7 +1159,6 @@ team_seeds_2022 = {
     "Indiana": 12,
     "South Dakota State": 13,
     "Chattanooga": 13,
-    "Wyoming": 12,
     "Richmond": 12,
     "New Mexico State": 12,
     "Rutgers/ND": 11,
@@ -502,9 +1174,7 @@ team_seeds_2022 = {
     "Georgia State": 16,
     "Norfolk State": 16,
     "Texas Southern": 16,
-    "Wright State": 16,
-    "Bryant": 16,
-    "Texas A&M Corpus Chris": 16
+    "Wright State": 16
     }
 team_seeds_2021 = {
     "Gonzaga": 1,
@@ -572,6 +1242,1183 @@ team_seeds_2021 = {
     "Mount St. Mary's/Texas Southern": 16,
     "Norfolk State/Appalachian State": 16
     }
+
+
+KenPom_champ_odds_2025 = {
+    "Duke": 22.9,
+    "Florida": 18.8,
+    "Auburn": 14.9,
+    "Houston": 12.2,
+    "Tennessee": 5.7,
+    "Alabama": 4.2,
+    "Michigan State": 2.7,
+    "Texas Tech": 2.6,
+    "Iowa State": 1.9,
+    "Maryland": 1.7,
+    "Saint John's": 1.7, 
+    "Wisconsin": 1.3,
+    "Arizona": 1.2,
+    "Gonzaga": 1.1,
+    "Kentucky": 0.8,
+    "Texas A&M": 0.7,
+    "Purdue": 0.6,
+    "Missouri": 0.6,
+    "Clemson": 0.6,
+    "Illinois": 0.5,
+    "Kansas": 0.4,
+    "Saint Mary's": 0.4,
+    "Ole Miss": 0.3,
+    "Michigan": 0.3,
+    "UCLA": 0.3,
+    "Louisville": 0.3,
+    "Marquette": 0.2,
+    "BYU": 0.2,
+    "Oregon": 0.1,
+    "Baylor": 0.1,
+    "VCU": 0.1,
+    "Connecticut": 0.09,
+    "UC San Diego": 0.07,
+    "Mississippi State": 0.07,
+    "Georgia": 0.05,
+    "UNC/San Diego State": 0.1,  
+    "Colorado State": 0.05,
+    "Creighton": 0.04,
+    "Oklahoma": 0.04,
+    "Arkansas": 0.03,
+    "New Mexico": 0.03,
+    "Texas/Xavier": 0.02,  
+    "Drake": 0.01,
+    "Memphis": 0.01,
+    "Utah State": 0.01,
+    "Vanderbilt": 0.01,
+    "McNeese": 0.008,
+    "Liberty": 0.007,
+    "Yale": 0.003,
+    "High Point": 0,  
+    "Lipscomb": 0,  
+    "Troy": 0,  
+    "UNC Wilmington": 0,  
+    "Akron": 0,  
+    "Robert Morris": 0,  
+    "Grand Canyon": 0,  
+    "Wofford": 0,  
+    "Bryant": 0,  
+    "Montana": 0,  
+    "Omaha": 0,  
+    "Norfolk State": 0,  
+    "SIUE": 0,  
+    "American/Mount St. Mary's": 0, 
+    "Alabama State/Saint Francis": 0  }
+KenPom_second_place_odds_2025 = {
+    "Duke": 35.6,
+    "Florida": 32.7,
+    "Auburn": 27.2,
+    "Houston": 20.9,
+    "Tennessee": 11.8,
+    "Alabama": 9.3,
+    "Michigan State": 7.0,
+    "Texas Tech": 6.5,
+    "Iowa State": 5.2,
+    "Maryland": 4.7,
+    "Saint John's": 4.8, 
+    "Wisconsin": 3.6,
+    "Arizona": 3.3,
+    "Gonzaga": 2.7,
+    "Kentucky": 2.4,
+    "Texas A&M": 2.3,
+    "Purdue": 2.0,
+    "Missouri": 2.0,
+    "Clemson": 1.8,
+    "Illinois": 1.5,
+    "Kansas": 1.3,
+    "Saint Mary's": 1.2,
+    "Ole Miss": 1.1,
+    "Michigan": 1.1,
+    "UCLA": 0.9,
+    "Louisville": 0.9,
+    "Marquette": 0.9,
+    "BYU": 0.8,
+    "Oregon": 0.5,
+    "Baylor": 0.5,
+    "VCU": 0.4,
+    "Connecticut": 0.4,
+    "UC San Diego": 0.3,
+    "Mississippi State": 0.3,
+    "Georgia": 0.2,
+    "UNC/San Diego State": 0.4,  
+    "Colorado State": 0.2,
+    "Creighton": 0.2,
+    "Oklahoma": 0.2,
+    "Arkansas": 0.2,
+    "New Mexico": 0.2,
+    "Texas/Xavier": 0.15,  
+    "Drake": 0.08,
+    "Memphis": 0.09,
+    "Utah State": 0.08,
+    "Vanderbilt": 0.07,
+    "McNeese": 0.05,
+    "Liberty": 0.04,
+    "Yale": 0.02,
+    "High Point": 0.007,
+    "Lipscomb": 0.000,
+    "Troy": 0.003,
+    "UNC Wilmington": 0.002,
+    "Akron": 0,  
+    "Robert Morris": 0,  
+    "Grand Canyon": 0.002,
+    "Wofford": 0,  
+    "Bryant": 0,  
+    "Montana": 0,  
+    "Omaha": 0,  
+    "Norfolk State": 0,  
+    "SIUE": 0,  
+    "American/Mount St. Mary's": 0,  
+    "Alabama State/Saint Francis": 0  }
+KenPom_final_four_odds_2025 = {
+    "Duke": 52.5,
+    "Florida": 50.1,
+    "Auburn": 45.8,
+    "Houston": 37.3,
+    "Tennessee": 25.1,
+    "Alabama": 16.8,
+    "Michigan State": 16.8,
+    "Texas Tech": 13.8,
+    "Iowa State": 13.0,
+    "Maryland": 11.1,
+    "Saint John's": 11.2, 
+    "Wisconsin": 8.5,
+    "Arizona": 8.2,
+    "Gonzaga": 7.1,
+    "Kentucky": 7.6,
+    "Texas A&M": 6.7,
+    "Purdue": 6.2,
+    "Missouri": 5.2,
+    "Clemson": 5.7,
+    "Illinois": 5.0,
+    "Kansas": 3.8,
+    "Saint Mary's": 3.5,
+    "Ole Miss": 3.6,
+    "Michigan": 3.5,
+    "UCLA": 3.4,
+    "Louisville": 3.0,
+    "Marquette": 3.1,
+    "BYU": 3.1,
+    "Oregon": 1.8,
+    "Baylor": 1.5,
+    "VCU": 1.4,
+    "Connecticut": 1.3,
+    "UC San Diego": 1.1,
+    "Mississippi State": 1.0,
+    "Georgia": 0.9,
+    "UNC/San Diego State": 1.8,  
+    "Colorado State": 1.0,
+    "Creighton": 1.0,
+    "Oklahoma": 0.8,
+    "Arkansas": 0.7,
+    "New Mexico": 0.8,
+    "Texas/Xavier": 0.8,  
+    "Drake": 0.4,
+    "Memphis": 0.4,
+    "Utah State": 0.5,
+    "Vanderbilt": 0.3,
+    "McNeese": 0.3,
+    "Liberty": 0.2,
+    "Yale": 0.1,
+    "High Point": 0.07,
+    "Lipscomb": 0.08,
+    "Troy": 0.03,
+    "UNC Wilmington": 0.01,
+    "Akron": 0.01,
+    "Robert Morris": 0.002,
+    "Grand Canyon": 0.02,
+    "Wofford": 0.001,
+    "Bryant": 0.001,
+    "Montana": 0.002,
+    "Omaha": 0.001,
+    "Norfolk State": 0, 
+    "SIUE": 0,  
+    "American/Mount St. Mary's": 0,  
+    "Alabama State/Saint Francis": 0  }
+KenPom_elite_eight_odds_2025 = {
+    "Duke": 69.4,
+    "Florida": 67.3,
+    "Auburn": 63.3,
+    "Houston": 54.4,
+    "Tennessee": 48.2,
+    "Alabama": 45.6,
+    "Michigan State": 38.6,
+    "Texas Tech": 34.1,
+    "Iowa State": 30.8,
+    "Maryland": 21.5,
+    "Saint John's": 31.0,  
+    "Wisconsin": 26.1,
+    "Arizona": 17.4,
+    "Gonzaga": 13.8,
+    "Kentucky": 20.8,
+    "Texas A&M": 14.3,
+    "Purdue": 14.2,
+    "Missouri": 16.2,
+    "Clemson": 13.0,
+    "Illinois": 14.2,
+    "Kansas": 12.6,
+    "Saint Mary's": 11.1,
+    "Ole Miss": 11.2,
+    "Michigan": 8.3,
+    "UCLA": 10.3,
+    "Louisville": 6.8,
+    "Marquette": 10.2,
+    "BYU": 8.9,
+    "Oregon": 5.1,
+    "Baylor": 4.0,
+    "VCU": 6.1,
+    "Connecticut": 3.6,
+    "UC San Diego": 4.0,
+    "Mississippi State": 2.9,
+    "Georgia": 2.6,
+    "UNC/San Diego State": 4.9,  
+    "Colorado State": 3.2,
+    "Creighton": 2.8,
+    "Oklahoma": 2.5,
+    "Arkansas": 3.6,
+    "New Mexico": 3.6,
+    "Texas/Xavier": 3.6,  
+    "Drake": 2.2,
+    "Memphis": 1.7,
+    "Utah State": 2.4,
+    "Vanderbilt": 2.0,
+    "McNeese": 1.4,
+    "Liberty": 1.1,
+    "Yale": 0.6,
+    "High Point": 0.5,
+    "Lipscomb": 0.6,
+    "Troy": 0.3,
+    "UNC Wilmington": 0.2,
+    "Akron": 0.1,
+    "Robert Morris": 0.04,
+    "Grand Canyon": 0.2,
+    "Wofford": 0.2,
+    "Bryant": 0.03,
+    "Montana": 0.03,
+    "Omaha": 0.04,
+    "Norfolk State": 0.009,
+    "SIUE": 0.004,
+    "American/Mount St. Mary's": 0.001, 
+    "Alabama State/Saint Francis": 0.002  }
+KenPom_sweet_sixteen_odds_2025 = {
+    "Duke": 84.6,
+    "Florida": 85.0,
+    "Auburn": 80.4,
+    "Houston": 71.5,
+    "Tennessee": 69.6,
+    "Alabama": 69.9,
+    "Michigan State": 65.7,
+    "Texas Tech": 58.2,
+    "Iowa State": 56.2,
+    "Maryland": 66.1,
+    "Saint John's": 59.6, 
+    "Wisconsin": 57.0,
+    "Arizona": 61.5,
+    "Gonzaga": 22.4,
+    "Kentucky": 49.4,
+    "Texas A&M": 45.3,
+    "Purdue": 45.0,
+    "Missouri": 32.6,
+    "Clemson": 40.5,
+    "Illinois": 35.2,
+    "Kansas": 28.4,
+    "Saint Mary's": 23.1,
+    "Ole Miss": 26.0,
+    "Michigan": 30.5,
+    "UCLA": 21.7,
+    "Louisville": 13.1,
+    "Marquette": 23.1,
+    "BYU": 24.0,
+    "Oregon": 26.6,
+    "Baylor": 8.7,
+    "VCU": 18.4,
+    "Connecticut": 8.5,
+    "UC San Diego": 18.3,
+    "Mississippi State": 6.7,
+    "Georgia": 6.0,
+    "UNC/San Diego State": 14.2,  
+    "Colorado State": 18.3,
+    "Creighton": 6.5,
+    "Oklahoma": 6.4,
+    "Arkansas": 11.4,
+    "New Mexico": 10.8,
+    "Texas/Xavier": 12.8, 
+    "Drake": 7.7,
+    "Memphis": 12.8,
+    "Utah State": 7.5,
+    "Vanderbilt": 6.6,
+    "McNeese": 9.5,
+    "Liberty": 9.4,
+    "Yale": 5.9,
+    "High Point": 4.9,
+    "Lipscomb": 3.6,
+    "Troy": 2.5,
+    "UNC Wilmington": 1.6,
+    "Akron": 2.4,
+    "Robert Morris": 0.4,
+    "Grand Canyon": 2.8,
+    "Wofford": 1.3,
+    "Bryant": 0.4,
+    "Montana": 0.6,
+    "Omaha": 0.5,
+    "Norfolk State": 0.1,
+    "SIUE": 0.06,
+    "American/Mount St. Mary's": 0.029, 
+    "Alabama State/Saint Francis": 0.008  }
+KenPom_round_32_odds_2025 = {
+    "Duke": 99.5,
+    "Florida": 99.0,
+    "Auburn": 99.7,
+    "Houston": 98.6,
+    "Tennessee": 93.4,
+    "Alabama": 97.0,
+    "Michigan State": 95.8,
+    "Texas Tech": 90.9,
+    "Iowa State": 85.8,
+    "Maryland": 89.7,
+    "Saint John's": 95.1, 
+    "Wisconsin": 94.1,
+    "Arizona": 89.8,
+    "Gonzaga": 69.0,
+    "Kentucky": 86.4,
+    "Texas A&M": 78.4,
+    "Purdue": 80.4,
+    "Missouri": 71.6,
+    "Clemson": 72.2,
+    "Illinois": 66.2,
+    "Kansas": 63.8,
+    "Saint Mary's": 65.8,
+    "Ole Miss": 59.6,
+    "Michigan": 58.5,
+    "UCLA": 65.1,
+    "Louisville": 59.7,
+    "Marquette": 61.1,
+    "BYU": 54.3,
+    "Oregon": 65.4,
+    "Baylor": 52.5,
+    "VCU": 45.7,
+    "Connecticut": 52.3,
+    "UC San Diego": 41.5,
+    "Mississippi State": 47.5,
+    "Georgia": 31.0,
+    "UNC/San Diego State": 40.5,  
+    "Colorado State": 54.8,
+    "Creighton": 40.3,
+    "Oklahoma": 47.7,
+    "Arkansas": 36.2,
+    "New Mexico": 38.9,
+    "Texas/Xavier": 33.8,  
+    "Drake": 28.4,
+    "Memphis": 45.2,
+    "Utah State": 34.9,
+    "Vanderbilt": 34.2,
+    "McNeese": 27.8,
+    "Liberty": 34.6,
+    "Yale": 21.6,
+    "High Point": 19.6,
+    "Lipscomb": 14.2,
+    "Troy": 13.6,
+    "UNC Wilmington": 9.1,
+    "Akron": 10.2,
+    "Robert Morris": 3.0,
+    "Grand Canyon": 10.3,
+    "Wofford": 6.6,
+    "Bryant": 4.2,
+    "Montana": 5.9,
+    "Omaha": 4.9,
+    "Norfolk State": 1.0,
+    "SIUE": 1.4,
+    "American/Mount St. Mary's": 0.5,  
+    "Alabama State/Saint Francis": 0.27 }
+
+
+champ_odds_2025_538 = {
+    "Duke": 18.5,
+    "Florida": 13.8,
+    "Houston": 15.6,
+    "Auburn": 11.9,
+    "Alabama": 5.4,
+    "Saint John's": 3.4,
+    "Tennessee": 5.1,
+    "Michigan State": 3.6,
+    "Wisconsin": 1.1,
+    "Texas Tech": 3.0,
+    "Kentucky": 0.9,
+    "Iowa State": 1.7,
+    "Arizona": 1.4,
+    "Maryland": 1.8,
+    "Purdue": 0.5,
+    "Texas A&M": 1.0,
+    "Oregon": 0.2,
+    "Memphis": 0.2,
+    "Clemson": 1.0,
+    "Michigan": 0.6,
+    "BYU": 0.6,
+    "Missouri": 0.4,
+    "Illinois": 0.7,
+    "Ole Miss": 0.5,
+    "Saint Mary's": 0.4,
+    "Kansas": 0.8,
+    "UCLA": 0.3,
+    "Marquette": 0.4,
+    "Gonzaga": 1.3,
+    "Connecticut": 0.5,
+    "Louisville": 0.9,
+    "Mississippi State": 0.1,
+    "Baylor": 0.2,
+    "Oklahoma": 0.1,
+    "Georgia": 0.1,
+    "Creighton": 0.2,
+    "Utah State": 0.0,
+    "Arkansas": 0.0,
+    "New Mexico": 0.1,
+    "Vanderbilt": 0.0,
+    "VCU": 0.3,
+    "Drake": 0.1,
+    "UNC/San Diego State": 0.3,
+    "Texas/Xavier": 0.3,
+    "Colorado State": 0.2,
+    "Liberty": 0.0,
+    "McNeese": 0.0,
+    "UC San Diego": 0.1,
+    "Grand Canyon": 0.0,
+    "High Point": 0.0,
+    "Yale": 0.0,
+    "Akron": 0.0,
+    "UNC Wilmington": 0.0,
+    "Troy": 0.0,
+    "Lipscomb": 0.0,
+    "Montana": 0.0,
+    "Omaha": 0.0,
+    "Wofford": 0.0,
+    "Bryant": 0.0,
+    "Robert Morris": 0.0,
+    "American/Mount St. Mary's": 0.0,
+    "Norfolk State": 0.0,
+    "SIUE": 0.0,
+    "Alabama State/Saint Francis": 0.0}
+second_place_odds_2025_538 = {
+    "Duke": 30.7,
+    "Florida": 25.0,
+    "Houston": 24.0,
+    "Auburn": 22.9,
+    "Alabama": 10.3,
+    "Saint John's": 8.3,
+    "Tennessee": 10.5,
+    "Michigan State": 8.6,
+    "Wisconsin": 2.7,
+    "Texas Tech": 7.0,
+    "Kentucky": 2.3,
+    "Iowa State": 4.4,
+    "Arizona": 3.2,
+    "Maryland": 4.6,
+    "Purdue": 1.5,
+    "Texas A&M": 2.5,
+    "Oregon": 0.7,
+    "Memphis": 0.6,
+    "Clemson": 2.6,
+    "Michigan": 1.7,
+    "BYU": 1.4,
+    "Missouri": 1.2,
+    "Illinois": 2.0,
+    "Ole Miss": 1.4,
+    "Saint Mary's": 1.1,
+    "Kansas": 2.2,
+    "UCLA": 0.7,
+    "Marquette": 1.3,
+    "Gonzaga": 2.9,
+    "Connecticut": 1.5,
+    "Louisville": 2.5,
+    "Mississippi State": 0.3,
+    "Baylor": 0.5,
+    "Oklahoma": 0.2,
+    "Georgia": 0.3,
+    "Creighton": 0.7,
+    "Utah State": 0.1,
+    "Arkansas": 0.2,
+    "New Mexico": 0.4,
+    "Vanderbilt": 0.1,
+    "VCU": 0.9,
+    "Drake": 0.5,
+    "UNC/San Diego State": 0.5,
+    "Texas/Xavier": 0.8,
+    "Colorado State": 0.8,
+    "Liberty": 0.1,
+    "McNeese": 0.1,
+    "UC San Diego": 0.4,
+    "Grand Canyon": 0.1,
+    "High Point": 0.1,
+    "Yale": 0.1,
+    "Akron": 0.0,
+    "UNC Wilmington": 0.0,
+    "Troy": 0.0,
+    "Lipscomb": 0.0,
+    "Montana": 0.0,
+    "Omaha": 0.0,
+    "Wofford": 0.0,
+    "Bryant": 0.0,
+    "Robert Morris": 0.0,
+    "American/Mount St. Mary's": 0.0,
+    "Norfolk State": 0.0,
+    "SIUE": 0.0,
+    "Alabama State/Saint Francis": 0.0}
+final_four_odds_2025_538 = {
+    "Duke": 51.3,
+    "Florida": 39.7,
+    "Houston": 38.2,
+    "Auburn": 39.9,
+    "Alabama": 19.9,
+    "Saint John's": 17.3,
+    "Tennessee": 23.1,
+    "Michigan State": 18.5,
+    "Wisconsin": 6.9,
+    "Texas Tech": 14.0,
+    "Kentucky": 6.9,
+    "Iowa State": 10.3,
+    "Arizona": 7.2,
+    "Maryland": 10.1,
+    "Purdue": 4.8,
+    "Texas A&M": 5.6,
+    "Oregon": 2.2,
+    "Memphis": 1.8,
+    "Clemson": 7.2,
+    "Michigan": 4.5,
+    "BYU": 3.7,
+    "Missouri": 3.2,
+    "Illinois": 5.9,
+    "Ole Miss": 3.8,
+    "Saint Mary's": 3.0,
+    "Kansas": 5.1,
+    "UCLA": 2.3,
+    "Marquette": 3.7,
+    "Gonzaga": 6.7,
+    "Connecticut": 3.7,
+    "Louisville": 6.2,
+    "Mississippi State": 1.0,
+    "Baylor": 1.3,
+    "Oklahoma": 0.7,
+    "Georgia": 0.9,
+    "Creighton": 1.8,
+    "Utah State": 0.5,
+    "Arkansas": 0.5,
+    "New Mexico": 1.1,
+    "Vanderbilt": 0.4,
+    "VCU": 2.6,
+    "Drake": 1.4,
+    "UNC/San Diego State": 0.9,
+    "Texas/Xavier": 2.6,
+    "Colorado State": 2.0,
+    "Liberty": 0.4,
+    "McNeese": 0.3,
+    "UC San Diego": 1.4,
+    "Grand Canyon": 0.3,
+    "High Point": 0.4,
+    "Yale": 0.4,
+    "Akron": 0.1,
+    "UNC Wilmington": 0.1,
+    "Troy": 0.1,
+    "Lipscomb": 0.1,
+    "Montana": 0.0,
+    "Omaha": 0.0,
+    "Wofford": 0.0,
+    "Bryant": 0.0,
+    "Robert Morris": 0.0,
+    "American/Mount St. Mary's": 0.0,
+    "Norfolk State": 0.0,
+    "SIUE": 0.0,
+    "Alabama State/Saint Francis": 0.0}
+elite_eight_odds_2025_538 = {
+    "Duke": 71.0,
+    "Florida": 58.6,
+    "Houston": 56.2,
+    "Auburn": 56.5,
+    "Alabama": 45.5,
+    "Saint John's": 38.9,
+    "Tennessee": 47.4,
+    "Michigan State": 40.3,
+    "Wisconsin": 20.7,
+    "Texas Tech": 31.2,
+    "Kentucky": 18.5,
+    "Iowa State": 26.0,
+    "Arizona": 15.2,
+    "Maryland": 19.8,
+    "Purdue": 10.6,
+    "Texas A&M": 12.2,
+    "Oregon": 6.2,
+    "Memphis": 4.7,
+    "Clemson": 15.4,
+    "Michigan": 9.6,
+    "BYU": 12.7,
+    "Missouri": 9.5,
+    "Illinois": 15.4,
+    "Ole Miss": 10.7,
+    "Saint Mary's": 10.5,
+    "Kansas": 13.0,
+    "UCLA": 7.6,
+    "Marquette": 10.7,
+    "Gonzaga": 13.0,
+    "Connecticut": 8.5,
+    "Louisville": 12.2,
+    "Mississippi State": 2.7,
+    "Baylor": 3.4,
+    "Oklahoma": 2.0,
+    "Georgia": 2.3,
+    "Creighton": 4.3,
+    "Utah State": 2.4,
+    "Arkansas": 2.0,
+    "New Mexico": 3.9,
+    "Vanderbilt": 2.1,
+    "VCU": 8.1,
+    "Drake": 4.9,
+    "UNC/San Diego State": 3.3,
+    "Texas/Xavier": 7.8,
+    "Colorado State": 5.2,
+    "Liberty": 1.1,
+    "McNeese": 1.1,
+    "UC San Diego": 4.0,
+    "Grand Canyon": 1.1,
+    "High Point": 1.4,
+    "Yale": 1.3,
+    "Akron": 0.3,
+    "UNC Wilmington": 0.4,
+    "Troy": 0.6,
+    "Lipscomb": 0.5,
+    "Montana": 0.2,
+    "Omaha": 0.1,
+    "Wofford": 0.3,
+    "Bryant": 0.2,
+    "Robert Morris": 0.3,
+    "American/Mount St. Mary's": 0.0,
+    "Norfolk State": 0.1,
+    "SIUE": 0.0,
+    "Alabama State/Saint Francis": 0.0}
+sweet_sixteen_odds_2025_538 = {
+    "Duke": 88.9,
+    "Florida": 78.2,
+    "Houston": 73.6,
+    "Auburn": 71.5,
+    "Alabama": 69.3,
+    "Saint John's": 68.4,
+    "Tennessee": 73.2,
+    "Michigan State": 66.1,
+    "Wisconsin": 46.8,
+    "Texas Tech": 59.0,
+    "Kentucky": 42.3,
+    "Iowa State": 54.0,
+    "Arizona": 56.2,
+    "Maryland": 53.9,
+    "Purdue": 34.9,
+    "Texas A&M": 41.1,
+    "Oregon": 34.0,
+    "Memphis": 19.0,
+    "Clemson": 48.5,
+    "Michigan": 32.0,
+    "BYU": 32.9,
+    "Missouri": 24.0,
+    "Illinois": 34.5,
+    "Ole Miss": 24.4,
+    "Saint Mary's": 22.3,
+    "Kansas": 25.3,
+    "UCLA": 17.7,
+    "Marquette": 22.7,
+    "Gonzaga": 21.3,
+    "Connecticut": 16.7,
+    "Louisville": 20.2,
+    "Mississippi State": 5.8,
+    "Baylor": 7.0,
+    "Oklahoma": 4.7,
+    "Georgia": 5.0,
+    "Creighton": 8.3,
+    "Utah State": 7.4,
+    "Arkansas": 5.8,
+    "New Mexico": 9.9,
+    "Vanderbilt": 6.5,
+    "VCU": 18.9,
+    "Drake": 14.6,
+    "UNC/San Diego State": 10.2,
+    "Texas/Xavier": 20.0,
+    "Colorado State": 20.5,
+    "Liberty": 7.1,
+    "McNeese": 7.5,
+    "UC San Diego": 19.1,
+    "Grand Canyon": 6.6,
+    "High Point": 9.1,
+    "Yale": 7.8,
+    "Akron": 2.8,
+    "UNC Wilmington": 2.3,
+    "Troy": 3.2,
+    "Lipscomb": 2.5,
+    "Montana": 1.4,
+    "Omaha": 0.7,
+    "Wofford": 1.7,
+    "Bryant": 1.3,
+    "Robert Morris": 1.8,
+    "American/Mount St. Mary's": 0.2,
+    "Norfolk State": 0.4,
+    "SIUE": 0.1,
+    "Alabama State/Saint Francis": 0.0}
+round_32_odds_2025_538 = {
+    "Duke": 98.5,
+    "Florida": 97.3,
+    "Houston": 98.2,
+    "Auburn": 98.7,
+    "Alabama": 92.7,
+    "Saint John's": 95.5,
+    "Tennessee": 93.4,
+    "Michigan State": 93.4,
+    "Wisconsin": 89.8,
+    "Texas Tech": 89.7,
+    "Kentucky": 83.8,
+    "Iowa State": 88.3,
+    "Arizona": 88.4,
+    "Maryland": 81.4,
+    "Purdue": 71.3,
+    "Texas A&M": 75.4,
+    "Oregon": 74.0,
+    "Memphis": 48.7,
+    "Clemson": 78.7,
+    "Michigan": 59.1,
+    "BYU": 59.9,
+    "Missouri": 58.3,
+    "Illinois": 59.9,
+    "Ole Miss": 54.5,
+    "Saint Mary's": 68.6,
+    "Kansas": 72.2,
+    "UCLA": 63.5,
+    "Marquette": 63.2,
+    "Gonzaga": 71.0,
+    "Connecticut": 68.6,
+    "Louisville": 63.5,
+    "Mississippi State": 47.2,
+    "Baylor": 52.8,
+    "Oklahoma": 31.4,
+    "Georgia": 29.0,
+    "Creighton": 36.5,
+    "Utah State": 36.5,
+    "Arkansas": 27.8,
+    "New Mexico": 36.8,
+    "Vanderbilt": 31.4,
+    "VCU": 40.1,
+    "Drake": 41.7,
+    "UNC/San Diego State": 45.5,
+    "Texas/Xavier": 40.1,
+    "Colorado State": 51.3,
+    "Liberty": 26.0,
+    "McNeese": 21.3,
+    "UC San Diego": 40.9,
+    "Grand Canyon": 18.6,
+    "High Point": 28.7,
+    "Yale": 24.6,
+    "Akron": 11.6,
+    "UNC Wilmington": 10.3,
+    "Troy": 16.2,
+    "Lipscomb": 11.7,
+    "Montana": 10.2,
+    "Omaha": 4.5,
+    "Wofford": 6.6,
+    "Bryant": 6.6,
+    "Robert Morris": 7.3,
+    "American/Mount St. Mary's": 1.5,
+    "Norfolk State": 2.7,
+    "SIUE": 1.8,
+    "Alabama State/Saint Francis": 1.2}
+
+
+fanduel_champ_odds_2025 = {
+    "Duke": 290,
+    "Florida": 390,
+    "Auburn": 500,
+    "Houston": 700,
+    "Alabama": 2000,
+    "Tennessee": 2200,
+    "Texas Tech": 2800,
+    "Iowa State": 2900,
+    "Michigan State": 3000,
+    "Saint John's": 3100,
+    "Arizona": 3900,
+    "Gonzaga": 4500,
+    "Kentucky": 5500,
+    "Wisconsin": 6000,
+    "Illinois": 6000,
+    "Missouri": 7500,
+    "Maryland": 7500,
+    "Kansas": 7500,
+    "Texas A&M": 9500,
+    "Clemson": 11000,
+    "BYU": 11000,
+    "Purdue": 11000,
+    "Louisville": 12000,
+    "Saint Mary's": 13000,
+    "Connecticut": 14000,
+    "Marquette": 15000,
+    "Ole Miss": 15000,
+    "UCLA": 16000,
+    "Michigan": 18000,
+    "Baylor": 21000,
+    "Oregon": 23000,
+    "Mississippi State": 23000,
+    "Creighton": 25000,
+    "VCU": 30000,
+    "UNC/San Diego State": 23628,
+    "Vanderbilt": 55000,
+    "Arkansas": 75000,
+    "Texas/Xavier": 48669,
+    "Colorado State": 95000,
+    "Georgia": 95000,
+    "Memphis": 100000,
+    "Oklahoma": 100000,
+    "Utah State": 100000,
+    "New Mexico": 100000,
+    "Drake": 1000000,
+    "Liberty": 1000000,
+    "McNeese": 1000000,
+    "UC San Diego": 1000000,
+    "Grand Canyon": 1000000,
+    "High Point": 1000000,
+    "Yale": 1000000,
+    "Akron": 1000000,
+    "UNC Wilmington": 1000000,
+    "Troy": 1000000,
+    "Lipscomb": 1000000,
+    "Montana": 1000000,
+    "Omaha": 1000000,
+    "Wofford": 1000000,
+    "Bryant": 1000000,
+    "Robert Morris": 1000000,
+    "American/Mount St. Mary's": 1000000,
+    "Norfolk State": 1000000,
+    "SIUE": 1000000,
+    "Alabama State/Saint Francis": 1000000 }
+fanduel_second_place_odds_2025 = {
+    "Duke": 160,
+    "Florida": 196,
+    "Auburn": 250,
+    "Houston": 350,
+    "Alabama": 890,
+    "Tennessee": 1000,
+    "Texas Tech": 1160,
+    "Iowa State": 1380,
+    "Michigan State": 1200,
+    "Saint John's": 3100,
+    "Arizona": 1550,
+    "Gonzaga": 1600,
+    "Kentucky": 1800,
+    "Wisconsin": 2500,
+    "Illinois": 3000,
+    "Missouri": 2900,
+    "Maryland": 2100,
+    "Kansas": 2900,
+    "Texas A&M": 2900,
+    "Clemson": 4200,
+    "BYU": 3900,
+    "Purdue": 3600,
+    "Louisville": 4400,
+    "Saint Mary's": 4700,
+    "Connecticut": 6000,
+    "Marquette": 7500,
+    "Ole Miss": 5500,
+    "UCLA": 6000,
+    "Michigan": 6500,
+    "Baylor": 9500,
+    "Oregon": 8500,
+    "Mississippi State": 10000,
+    "Creighton": 9000,
+    "VCU": 9000,
+    "UNC/San Diego State": 9200,
+    "Vanderbilt": 20000,
+    "Arkansas": 18000,
+    "Texas/Xavier": 13000,
+    "Colorado State": 24000,
+    "Georgia": 24000,
+    "Memphis": 37000,
+    "Oklahoma": 30000,
+    "Utah State": 100000,
+    "New Mexico": 30000,
+    "Drake": 50000,
+    "Liberty": 100000,
+    "McNeese": 40000,
+    "UC San Diego": 22000,
+    "Grand Canyon": 100000,
+    "High Point": 100000,
+    "Yale": 40000,
+    "Akron": 1000000,
+    "UNC Wilmington": 1000000,
+    "Troy": 1000000,
+    "Lipscomb": 1000000,
+    "Montana": 1000000,
+    "Omaha": 1000000,
+    "Wofford": 1000000,
+    "Bryant": 1000000,
+    "Robert Morris": 1000000,
+    "American/Mount St. Mary's": 1000000,
+    "Norfolk State": 1000000,
+    "SIUE": 1000000,
+    "Alabama State/Saint Francis": 1000000  }
+fanduel_final_four_odds_2025 = {
+    "Duke": -135,
+    "Florida": -125,
+    "Auburn": 100,
+    "Houston": 140,
+    "Alabama": 430,
+    "Tennessee": 350,
+    "Texas Tech": 500,
+    "Iowa State": 500,
+    "Michigan State": 500,
+    "Saint John's": 630,
+    "Arizona": 800,
+    "Gonzaga": 850,
+    "Kentucky": 850,
+    "Wisconsin": 1100,
+    "Illinois": 1000,
+    "Missouri": 1400,
+    "Maryland": 1100,
+    "Kansas": 1400,
+    "Texas A&M": 1200,
+    "Clemson": 1400,
+    "BYU": 2000,
+    "Purdue": 1400,
+    "Louisville": 1800,
+    "Saint Mary's": 2300,
+    "Connecticut": 2400,
+    "Marquette": 2200,
+    "Ole Miss": 2100,
+    "UCLA": 2000,
+    "Michigan": 2200,
+    "Baylor": 3600,
+    "Oregon": 3100,
+    "Mississippi State": 3600,
+    "Creighton": 3300,
+    "VCU": 3700,
+    "UNC/San Diego State": 3472,
+    "Vanderbilt": 7500,
+    "Arkansas": 7500,
+    "Texas/Xavier": 4822,
+    "Colorado State": 6000,
+    "Georgia": 7500,
+    "Memphis": 8500,
+    "Oklahoma": 8500,
+    "Utah State": 10000,
+    "New Mexico": 7500,
+    "Drake": 16000,
+    "Liberty": 25000,
+    "McNeese": 10000,
+    "UC San Diego": 5500,
+    "Grand Canyon": 25000,
+    "High Point": 25000,
+    "Yale": 17000,
+    "Akron": 25000,
+    "UNC Wilmington": 25000,
+    "Troy": 1000000,
+    "Lipscomb": 1000000,
+    "Montana": 1000000,
+    "Omaha": 1000000,
+    "Wofford": 1000000,
+    "Bryant": 1000000,
+    "Robert Morris": 1000000,
+    "American/Mount St. Mary's": 1000000,
+    "Norfolk State": 1000000,
+    "SIUE": 1000000,
+    "Alabama State/Saint Francis": 1000000 }
+fanduel_elite_eight_odds_2025 = {
+    "Duke": -240,
+    "Florida": -260,
+    "Auburn": -192,
+    "Houston": -136,
+    "Alabama": 122,
+    "Tennessee": 126,
+    "Texas Tech": 178,
+    "Iowa State": 178,
+    "Michigan State": 164,
+    "Saint John's": 210,
+    "Arizona": 390,
+    "Gonzaga": 450,
+    "Kentucky": 320,
+    "Wisconsin": 300,
+    "Illinois": 400,
+    "Missouri": 490,
+    "Maryland": 460,
+    "Kansas": 490,
+    "Texas A&M": 600,
+    "Clemson": 610,
+    "BYU": 590,
+    "Purdue": 640,
+    "Louisville": 920,
+    "Saint Mary's": 690,
+    "Connecticut": 1080,
+    "Marquette": 790,
+    "Ole Miss": 720,
+    "UCLA": 700,
+    "Michigan": 1020,
+    "Baylor": 1600,
+    "Oregon": 1380,
+    "Mississippi State": 1750,
+    "Creighton": 1550,
+    "VCU": 1040,
+    "UNC/San Diego State": 1096,
+    "Vanderbilt": 1750,
+    "Arkansas": 1650,
+    "Texas/Xavier": 1550,
+    "Colorado State": 2000,
+    "Georgia": 3200,
+    "Memphis": 2800,
+    "Oklahoma": 2900,
+    "Utah State": 2800,
+    "New Mexico": 1800,
+    "Drake": 3800,
+    "Liberty": 10000,
+    "McNeese": 3400,
+    "UC San Diego": 2000,
+    "Grand Canyon": 10000,
+    "High Point": 10000,
+    "Yale": 6500,
+    "Akron": 25000,
+    "UNC Wilmington": 25000,
+    "Troy": 15000,
+    "Lipscomb": 15000,
+    "Montana": 25000,
+    "Omaha": 25000,
+    "Wofford": 25000,
+    "Bryant": 50000,
+    "Robert Morris": 25000,
+    "American/Mount St. Mary's": 100000,
+    "Norfolk State": 100000,
+    "SIUE": 100000,
+    "Alabama State/Saint Francis": 100000}
+fanduel_sweet_sixteen_odds_2025 = {
+    "Duke": -700,
+    "Florida": -700,
+    "Auburn": -430,
+    "Houston": -300,
+    "Alabama": -250,
+    "Tennessee": -260,
+    "Texas Tech": -172,
+    "Iowa State": -156,
+    "Michigan State": -215,
+    "Saint John's": -146,
+    "Arizona": -196,
+    "Gonzaga": 280,
+    "Kentucky": 104,
+    "Wisconsin": -118,
+    "Illinois": 148,
+    "Missouri": 194,
+    "Maryland": -156,
+    "Kansas": 200,
+    "Texas A&M": 114,
+    "Clemson": 124,
+    "BYU": 215,
+    "Purdue": 130,
+    "Louisville": 550,
+    "Saint Mary's": 320,
+    "Connecticut": 630,
+    "Marquette": 290,
+    "Ole Miss": 270,
+    "UCLA": 290,
+    "Michigan": 215,
+    "Baylor": 960,
+    "Oregon": 235,
+    "Mississippi State": 880,
+    "Creighton": 840,
+    "VCU": 380,
+    "UNC/San Diego State": 433,
+    "Vanderbilt": 740,
+    "Arkansas": 610,
+    "Texas/Xavier": 547,
+    "Colorado State": 350,
+    "Georgia": 1550,
+    "Memphis": 460,
+    "Oklahoma": 1480,
+    "Utah State": 1000,
+    "New Mexico": 670,
+    "Drake": 1160,
+    "Liberty": 1220,
+    "McNeese": 700,
+    "UC San Diego": 390,
+    "Grand Canyon": 1320,
+    "High Point": 1260,
+    "Yale": 920,
+    "Akron": 2200,
+    "UNC Wilmington": 3600,
+    "Troy": 2200,
+    "Lipscomb": 3200,
+    "Montana": 10000,
+    "Omaha": 13000,
+    "Wofford": 8000,
+    "Bryant": 8000,
+    "Robert Morris": 15000,
+    "American/Mount St. Mary's": 25000,
+    "Norfolk State": 25000,
+    "SIUE": 25000,
+    "Alabama State/Saint Francis": 25000}
+fanduel_round_32_odds_2025 = {
+    "Duke": -30000,
+    "Florida": -30000,
+    "Auburn": -30000,
+    "Houston": -50000,
+    "Alabama": -7000,
+    "Tennessee": -4000,
+    "Texas Tech": -2000,
+    "Iowa State": -1300,
+    "Michigan State": -3500,
+    "Saint John's": -3500,
+    "Arizona": -1100,
+    "Gonzaga": -265,
+    "Kentucky": -610,
+    "Wisconsin": -2500,
+    "Illinois": -164,
+    "Missouri": -275,
+    "Maryland": -600,
+    "Kansas": -192,
+    "Texas A&M": -315,
+    "Clemson": -345,
+    "BYU": -152,
+    "Purdue": -335,
+    "Louisville": -138,
+    "Saint Mary's": -170,
+    "Connecticut": -178,
+    "Marquette": -166,
+    "Ole Miss": -131,
+    "UCLA": -205,
+    "Michigan": -142,
+    "Baylor": 105,
+    "Oregon": -265,
+    "Mississippi State": -126,
+    "Creighton": 115,
+    "VCU": 126,
+    "UNC/San Diego State": 110,
+    "Vanderbilt": 140,
+    "Arkansas": 158,
+    "Texas/Xavier": 136,
+    "Colorado State": -128,
+    "Georgia": 215,
+    "Memphis": 106,
+    "Oklahoma": 146,
+    "Utah State": 168,
+    "New Mexico": 138,
+    "Drake": 220,
+    "Liberty": 215,
+    "McNeese": 270,
+    "UC San Diego": 118,
+    "Grand Canyon": 430,
+    "High Point": 265,
+    "Yale": 250,
+    "Akron": 680,
+    "UNC Wilmington": 980,
+    "Troy": 440,
+    "Lipscomb": 760,
+    "Montana": 1100,
+    "Omaha": 1280,
+    "Wofford": 1400,
+    "Bryant": 1280,
+    "Robert Morris": 2000,
+    "American/Mount St. Mary's": 5000,
+    "Norfolk State": 5000,
+    "SIUE": 5500,
+    "Alabama State/Saint Francis": 5000}
+
 
 champ_odds_2024 = {
     "Connecticut": 23.4,
@@ -1034,7 +2881,6 @@ champ_odds_2023 = {
     "UNC Asheville": 0.001,
     "Texas A&M Corpus Chris": 0.002,
     "Howard": 0.001,
-    "Southern": 0.001,
     "FDU/Texas Southern": 0.001
     }
 second_place_odds_2023 = {
@@ -1373,13 +3219,6 @@ round_32_odds_2023 = {
     "FDU/Texas Southern": 0.6
     }
 
-champ_odds_538_2023 = {}
-second_place_odds_538_2023 = {}
-final_four_odds_538_2023 = {}
-elite_eight_odds_538_2023 = {}
-sweet_sixteen_odds_538_2023 = {}
-round_32_odds_538_2023 = {}
-
 champ_odds_2022 = {
     "Gonzaga": 27.5,
     "Arizona": 8.9,
@@ -1426,11 +3265,10 @@ champ_odds_2022 = {
     "UAB": 0.06,
     "Marquette": 0.05,
     "Vermont": 0.05,
-    "Indiana": 0.05,
+    "Indiana": 0.07,
     "Rutgers/ND": 0.048,
     "South Dakota State": 0.03,
     "Chattanooga": 0.02,
-    "Wyoming": 0.02,
     "Richmond": 0.01,
     "New Mexico State": 0.01,
     "Colgate": 0.001,
@@ -1445,9 +3283,7 @@ champ_odds_2022 = {
     "Georgia State": 0.001,
     "Norfolk State": 0.001,
     "Texas Southern": 0.001,
-    "Wright State": 0.001,
-    "Bryant": 0.001,
-    "Texas A&M Corpus Chris": 0.001
+    "Wright State": 0.001
     }
 second_place_odds_2022 = {
     "Gonzaga": 38.5,
@@ -1495,11 +3331,10 @@ second_place_odds_2022 = {
     "UAB": 0.3,
     "Marquette": 0.2,
     "Vermont": 0.2,
-    "Indiana": 0.2,
+    "Indiana": 0.28,
     "Rutgers/ND": 0.14,
     "South Dakota State": 0.2,
     "Chattanooga": 0.1,
-    "Wyoming": 0.08,
     "Richmond": 0.10,
     "New Mexico State": 0.06,
     "Colgate": 0.01,
@@ -1514,9 +3349,7 @@ second_place_odds_2022 = {
     "Georgia State": 0.001,
     "Norfolk State": 0.001,
     "Texas Southern": 0.001,
-    "Wright State": 0.001,
-    "Bryant": 0.001,
-    "Texas A&M Corpus Chris": 0.001
+    "Wright State": 0.001
     }
 final_four_odds_2022 = {
     "Gonzaga": 53.7,
@@ -1564,10 +3397,9 @@ final_four_odds_2022 = {
     "UAB": 0.8,
     "Marquette": 1.1,
     "Vermont": 0.7,
-    "Indiana": 0.7,
+    "Indiana": 0.11,
     "South Dakota State": 0.9,
     "Chattanooga": 0.5,
-    "Wyoming": 0.4,
     "Richmond": 0.5,
     "New Mexico State": 0.3,
     "Rutgers/ND": 0.7,
@@ -1582,10 +3414,8 @@ final_four_odds_2022 = {
     "Yale": 0.02,
     "Georgia State": 0.009,
     "Norfolk State": 0.009,
-    "Texas Southern": 0.006,
-    "Wright State": 0.002,
-    "Bryant": 0.002,
-    "Texas A&M Corpus Chris": 0.001
+    "Texas Southern": 0.007,
+    "Wright State": 0.004
     }
 elite_eight_odds_2022 = {
     "Gonzaga": 70.8,
@@ -1633,10 +3463,9 @@ elite_eight_odds_2022 = {
     "UAB": 2.5,
     "Marquette": 3.6,
     "Vermont": 2.3,
-    "Indiana": 2.2,
+    "Indiana": 3.4,
     "South Dakota State": 3.0,
     "Chattanooga": 1.7,
-    "Wyoming": 1.3,
     "Richmond": 1.8,
     "New Mexico State": 1.2,
     "Rutgers/ND": 3.5,
@@ -1651,10 +3480,8 @@ elite_eight_odds_2022 = {
     "Yale": 0.2,
     "Georgia State": 0.07,
     "Norfolk State": 0.1,
-    "Texas Southern": 0.05,
-    "Wright State": 0.02,
-    "Bryant": 0.02,
-    "Texas A&M Corpus Chris": 0.003
+    "Texas Southern": 0.053,
+    "Wright State": 0.04
     }
 sweet_sixteen_odds_2022 = {
     "Gonzaga": 84.4,
@@ -1702,10 +3529,9 @@ sweet_sixteen_odds_2022 = {
     "UAB": 9.7,
     "Marquette": 11.1,
     "Vermont": 14.9,
-    "Indiana": 7.0,
+    "Indiana": 11.8,
     "South Dakota State": 12.3,
     "Chattanooga": 7.7,
-    "Wyoming": 4.8,
     "Richmond": 8.4,
     "New Mexico State": 9.9,
     "Rutgers/ND": 10.8,
@@ -1720,10 +3546,8 @@ sweet_sixteen_odds_2022 = {
     "Yale": 1.7,
     "Georgia State": 0.4,
     "Norfolk State": 0.9,
-    "Texas Southern": 0.4,
-    "Wright State": 0.3,
-    "Bryant": 0.2,
-    "Texas A&M Corpus Chris": 0.07
+    "Texas Southern": 0.47,
+    "Wright State": 0.5
         }
 round_32_odds_2022 = {
     "Gonzaga": 97.9,
@@ -1771,10 +3595,9 @@ round_32_odds_2022 = {
     "UAB": 22.7,
     "Marquette": 44.7,
     "Vermont": 35.5,
-    "Indiana": 21.1,
+    "Indiana": 37.0,
     "South Dakota State": 44.1,
     "Chattanooga": 31.2,
-    "Wyoming": 15.9,
     "Richmond": 19.5,
     "New Mexico State": 29.4,
     "Rutgers/ND": 37.7,
@@ -1789,10 +3612,8 @@ round_32_odds_2022 = {
     "Yale": 11.0,
     "Georgia State": 2.1,
     "Norfolk State": 5.5,
-    "Texas Southern": 2.8,
-    "Wright State": 1.6,
-    "Bryant": 1.3,
-    "Texas A&M Corpus Chris": 0.8
+    "Texas Southern": 3.6,
+    "Wright State": 2.9
     }
 
 champ_odds_2021 = {
@@ -2193,8 +4014,6 @@ round_32_odds_2021 = {
     }
 
 
-odds_type = "percentage"
-round_32_vig = 0.05 if odds_type == "american" else 0.0
 
 ## PAST AUCTION RESULTS
 auction_results_2025 = {}
@@ -2463,22 +4282,139 @@ auction_results_2021 = {
     "North Carolina": 1031
     }
 
+
 auction_total_2024 = sum(auction_results_2024.values())
 auction_total_2023 = sum(auction_results_2023.values())
 auction_total_2022 = sum(auction_results_2022.values())
 auction_total_2021 = sum(auction_results_2021.values())
 
-past_pots = [auction_total_2021, auction_total_2022, auction_total_2023, auction_total_2024]
+past_pots = {
+    2021: auction_total_2021,
+    2022: auction_total_2022, 
+    2023: auction_total_2023, 
+    2024: auction_total_2024}
+team_seeds_data = {
+    2021: team_seeds_2021,
+    2022: team_seeds_2022,
+    2023: team_seeds_2023,
+    2024: team_seeds_2024,
+    2025: team_seeds_2025}
+log_data = []
+auction_relative = {}
+auction_2025 = CalcuttaAuction(
+    champ_odds_2025_538, second_place_odds_2025_538, final_four_odds_2025_538, elite_eight_odds_2025_538, sweet_sixteen_odds_2025_538, round_32_odds_2025_538, 
+    fanduel_champ_odds_2025, fanduel_second_place_odds_2025, fanduel_final_four_odds_2025, fanduel_elite_eight_odds_2025, fanduel_sweet_sixteen_odds_2025, fanduel_round_32_odds_2025,
+    KenPom_champ_odds_2025, KenPom_second_place_odds_2025, KenPom_final_four_odds_2025, KenPom_elite_eight_odds_2025, KenPom_sweet_sixteen_odds_2025, KenPom_round_32_odds_2025,
+    round_32_vig, team_seeds_2025, auction_results_2025, auction_relative)
+fair_shares_2025 = auction_2025.calculate_fair_value()[1]
+auction = auction_2025
 
 
-auction = CalcuttaAuction(
-    past_pots, champ_odds_2024, second_place_odds_2024, final_four_odds_2024, elite_eight_odds_2024, sweet_sixteen_odds_2024, round_32_odds_2024, round_32_vig, team_seeds_2024, odds_type, auction_results_2025
-)
-
-initial_fair_values = auction.calculate_fair_value()
-print(json.dumps({team: round(value, 2) for team, value in initial_fair_values.items()}, indent=2)) 
+initial_fair_values, initial_fair_shares = auction.calculate_fair_value()
+auction.print_results_table(initial_fair_values, initial_fair_shares)
 auction.run_live_update()  
 
-#print(auction.past_auction_study(auction_results_2021, 2021))
+
+
+
+
+
+
+
+# auction_2021 = CalcuttaAuction(
+#     champ_odds_2021, second_place_odds_2021, final_four_odds_2021, elite_eight_odds_2021, sweet_sixteen_odds_2021, round_32_odds_2021, 
+#     fanduel_champ_odds_2025, fanduel_second_place_odds_2025, fanduel_final_four_odds_2025, fanduel_elite_eight_odds_2025, fanduel_sweet_sixteen_odds_2025, fanduel_round_32_odds_2025, 
+#     round_32_vig, team_seeds_2021, auction_results_2025, auction_relative)
+# auction_2022 = CalcuttaAuction(
+#     champ_odds_2022, second_place_odds_2022, final_four_odds_2022, elite_eight_odds_2022, sweet_sixteen_odds_2022, round_32_odds_2022, 
+#     fanduel_champ_odds_2025, fanduel_second_place_odds_2025, fanduel_final_four_odds_2025, fanduel_elite_eight_odds_2025, fanduel_sweet_sixteen_odds_2025, fanduel_round_32_odds_2025, 
+#     round_32_vig, team_seeds_2022, auction_results_2025, auction_relative)
+# auction_2023 = CalcuttaAuction(
+#     champ_odds_2023, second_place_odds_2023, final_four_odds_2023, elite_eight_odds_2023, sweet_sixteen_odds_2023, round_32_odds_2023, 
+#     fanduel_champ_odds_2025, fanduel_second_place_odds_2025, fanduel_final_four_odds_2025, fanduel_elite_eight_odds_2025, fanduel_sweet_sixteen_odds_2025, fanduel_round_32_odds_2025, 
+#     round_32_vig, team_seeds_2023, auction_results_2025, auction_relative)
+# auction_2024 = CalcuttaAuction(
+#     champ_odds_2024, second_place_odds_2024, final_four_odds_2024, elite_eight_odds_2024, sweet_sixteen_odds_2024, round_32_odds_2024, 
+#     fanduel_champ_odds_2025, fanduel_second_place_odds_2025, fanduel_final_four_odds_2025, fanduel_elite_eight_odds_2025, fanduel_sweet_sixteen_odds_2025, fanduel_round_32_odds_2025, 
+#     round_32_vig, team_seeds_2024, auction_results_2025, auction_relative)
+
+
+# fair_shares_2021 = auction_2021.calculate_fair_value()[1]
+# fair_shares_2022 = auction_2022.calculate_fair_value()[1]
+# fair_shares_2023 = auction_2023.calculate_fair_value()[1]
+# fair_shares_2024 = auction_2024.calculate_fair_value()[1]
+
+
+
+
+
+# fair_share_data = {
+#     2021: fair_shares_2021,
+#     2022: fair_shares_2022,
+#     2023: fair_shares_2023,
+#     2024: fair_shares_2024}
+# auction_results_data = {
+#     2021: auction_results_2021,
+#     2022: auction_results_2022,
+#     2023: auction_results_2023,
+#     2024: auction_results_2024}
+
+# optimal_params_by_year = { 
+#     '2021': (0.0886, 4.22) 
+# }
+    
+
+## CODE BELOW RUNS THE PROGRAM
+
+
+
+#auction.cross_validation(auction_results_data, fair_share_data)
+
+# for year in [2021, 2022, 2023, 2024]:
+#     auction_results = auction_results_data[year]  
+#     fair_shares= fair_share_data[year]
+#     a = 0.0886
+#     b = 4.22
+#     df = auction.generate_auction_df_for_year_and_params(auction_results, fair_shares, (a, b), year)
+#     print(f"Generated DataFrame for {year} with parameters a={a}, b={b})")
+
+
+#auction.generate_team_odds(Fanduel = True)
+
+
+
+
+
+
+
+
+
+
+# for team in auction.fanduel_champ_odds:
+#     odds_list = [fanduel_round_32_odds_2025[team], fanduel_sweet_sixteen_odds_2025[team], fanduel_elite_eight_odds_2025[team], fanduel_final_four_odds_2025[team], fanduel_second_place_odds_2025[team], fanduel_champ_odds_2025[team]]
+
+#     KenPom_champ_odds, devig_fanduel_champ_odds = round(auction.champ_odds[team]*100,2), round(auction.fanduel_champ_odds[team]*100,2)
+#     KenPom_second_place_odds, devig_fanduel_second_place_odds = round(auction.second_place_odds[team]*100,2), round(auction.fanduel_second_place_odds[team]*100,2)
+#     KenPom_final_four_odds, devig_fanduel_final_four_odds = round(auction.final_four_odds[team]*100.2), round(auction.fanduel_final_four_odds[team]*100,2)
+#     KenPom_elite_eight_odds, devig_fanduel_elite_eight_odds = round(auction.elite_eight_odds[team]*100,2), round(auction.fanduel_elite_eight_odds[team]*100,2)
+#     KenPom_sweet_sixteen_odds, devig_fanduel_sweet_sixteen_odds = round(auction.sweet_sixteen_odds[team]*100,2), round(auction.fanduel_sweet_sixteen_odds[team]*100,2)
+#     KenPom_round_32_odds, devig_fanduel_round_32_odds = round(auction.round_32_odds[team]*100,2), round(auction.fanduel_round_32_odds[team]*100,2)
+        
+#     KenPom_list = [KenPom_round_32_odds, KenPom_sweet_sixteen_odds, KenPom_elite_eight_odds, KenPom_final_four_odds, KenPom_second_place_odds, KenPom_champ_odds]
+#     devig_odds_list = [devig_fanduel_round_32_odds, devig_fanduel_sweet_sixteen_odds, devig_fanduel_elite_eight_odds, devig_fanduel_final_four_odds, devig_fanduel_second_place_odds, devig_fanduel_champ_odds]
+#     # combined_odds_list = 
+    
+#     print("FD Raw", team, odds_list)
+#     print("538", team, KenPom_list)
+#     print("Fanduel", team, devig_odds_list)
+#     print("")
+
+
+# auction.generate_devigged_fd_odds_csv()
+# print("538", auction.devig_odds(champ_odds_2025_538, expected_total=1, odds_type="Percentage"))
+# print("Fanduel", auction.devig_odds(fanduel_champ_odds_2025, expected_total=1, odds_type="American"))
+
+#print(auction.past_auction_study(auction_results_2022, 2022))
+
 
 
