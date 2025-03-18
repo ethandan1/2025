@@ -539,6 +539,17 @@ class CalcuttaAuction:
         
         # Data for KenPom odds
         kp_row = f"{'KenPom Odds':<{odds_type_width-1}} | "
+        kp_r32 = f"{self.KenPom_round_32_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_s16 = f"{self.KenPom_sweet_sixteen_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_e8 = f"{self.KenPom_elite_eight_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_f4 = f"{self.KenPom_final_four_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_2nd = f"{self.KenPom_second_place_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
+        kp_win = f"{self.KenPom_champ_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj)
+        print(f"{kp_row}{kp_r32}{kp_s16}{kp_e8}{kp_f4}{kp_2nd}{kp_win}")
+        print("\n")
+
+        # Data for KenPom odds
+        kp_row = f"{'538 Odds':<{odds_type_width-1}} | "
         kp_r32 = f"{self.round_32_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
         kp_s16 = f"{self.sweet_sixteen_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
         kp_e8 = f"{self.elite_eight_odds.get(team, 0)*100:.1f}%".ljust(rounds_width-width_adj) + " | " 
